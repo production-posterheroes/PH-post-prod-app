@@ -2,7 +2,6 @@
 import streamlit as st
 import os
 import time
-import zipio
 import io
 from PIL import Image
 import zipfile
