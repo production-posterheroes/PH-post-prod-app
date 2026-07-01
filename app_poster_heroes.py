@@ -49,10 +49,25 @@ DIR_PIEDS = WORK_DIR / "pieds"
 DIR_OUTPUT = WORK_DIR / "sorties"
 
 # Spécification d'impression finale (utilisée pour le manifeste de génération)
-PRINT_WIDTH_CM = 60
-PRINT_HEIGHT_CM = 40
+# Format portrait (le sportif est vertical sur le poster) : largeur × hauteur
+PRINT_WIDTH_CM = 40
+PRINT_HEIGHT_CM = 60
 PRINT_DPI = 300
 COLOR_PROFILE = "sRGB"
+
+# Ratios acceptés par l'API image de Nano Banana Pro (Gemini 3 Pro Image)
+_ALLOWED_ASPECT_RATIOS = {
+    "1:1": 1.0, "2:3": 2 / 3, "3:2": 3 / 2, "3:4": 3 / 4, "4:3": 4 / 3,
+    "4:5": 4 / 5, "5:4": 5 / 4, "9:16": 9 / 16, "16:9": 16 / 9, "21:9": 21 / 9,
+}
+
+
+def nearest_aspect_ratio(width_cm: float, height_cm: float) -> str:
+    target = width_cm / height_cm
+    return min(_ALLOWED_ASPECT_RATIOS, key=lambda k: abs(_ALLOWED_ASPECT_RATIOS[k] - target))
+
+
+PRINT_ASPECT_RATIO = nearest_aspect_ratio(PRINT_WIDTH_CM, PRINT_HEIGHT_CM)
 
 
 def cm_to_px(cm: float, dpi: int = PRINT_DPI) -> int:
@@ -460,6 +475,14 @@ def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -
     Lève une exception explicite en cas d'échec (quota, facturation, réseau,
     réponse sans image) — à charge de l'appelant de l'afficher proprement.
     """
+    config = genai_types.GenerateContentConfig(
+        response_modalities=["TEXT", "IMAGE"],
+        image_config=genai_types.ImageConfig(
+            image_size="4K",
+            aspect_ratio=PRINT_ASPECT_RATIO,
+        ),
+    )
+
     response = client.models.generate_content(
         model=NANO_BANANA_MODEL,
         contents=[
@@ -468,6 +491,7 @@ def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -
             _image_part(DIR_PORTRAITS / pair.portrait_name),
             _image_part(DIR_PIEDS / pair.pieds_name),
         ],
+        config=config,
     )
 
     candidates = getattr(response, "candidates", None) or []
@@ -730,9 +754,10 @@ if match and match.pairs:
                     result_img = generate_poster_real(
                         pair, template_path, client, DEFAULT_PROMPT
                     )
+                    result_img.save(out_path, "JPEG", quality=100, subsampling=0)
                 else:
                     result_img = generate_poster_placeholder(pair, template_path)
-                result_img.save(out_path, quality=95)
+                    result_img.save(out_path, "JPEG", quality=92)
             except Exception as exc:
                 errors.append(f"{pair.athlete} : {exc}")
             bar.progress(
