@@ -93,8 +93,8 @@ st.markdown(
         opacity: 0.85;
     }
 
-    /* ---------- BLOCS NOIRS (une étape = un bloc) ---------- */
-    .ph-block {
+    /* ---------- BLOCS NOIRS (une étape = un bloc réel st.container(key=)) ---------- */
+    div[class*="st-key-ph-step-"] {
         background-color: #000000 !important;
         border: none !important;
         box-shadow: none !important;
@@ -102,9 +102,13 @@ st.markdown(
         margin-bottom: 24px !important;
         border-radius: 0px !important;
     }
-    .ph-block * { border-radius: 0px !important; }
-    .ph-block, .ph-block p, .ph-block span, .ph-block label,
-    .ph-block div, .ph-block small {
+    div[class*="st-key-ph-step-"] * { border-radius: 0px !important; }
+    div[class*="st-key-ph-step-"],
+    div[class*="st-key-ph-step-"] p,
+    div[class*="st-key-ph-step-"] span,
+    div[class*="st-key-ph-step-"] label,
+    div[class*="st-key-ph-step-"] div,
+    div[class*="st-key-ph-step-"] small {
         color: #FFFFFF !important;
     }
     .ph-step-eyebrow {
@@ -151,32 +155,32 @@ st.markdown(
     }
 
     /* ---------- UPLOADERS : bloc noir pur, pointillés blancs, texte blanc ---------- */
-    .ph-block .stFileUploader,
-    .ph-block [data-testid="stFileUploaderDropzone"],
-    .ph-block .stFileUploader section {
+    div[class*="st-key-ph-step-"] .stFileUploader,
+    div[class*="st-key-ph-step-"] [data-testid="stFileUploaderDropzone"],
+    div[class*="st-key-ph-step-"] .stFileUploader section {
         background-color: #000000 !important;
         border: 2px dashed #FFFFFF !important;
         border-radius: 0px !important;
     }
-    .ph-block .stFileUploader section div,
-    .ph-block .stFileUploader section span,
-    .ph-block .stFileUploader small {
+    div[class*="st-key-ph-step-"] .stFileUploader section div,
+    div[class*="st-key-ph-step-"] .stFileUploader section span,
+    div[class*="st-key-ph-step-"] .stFileUploader small {
         color: #FFFFFF !important;
         opacity: 0.85;
     }
-    .ph-block .stFileUploader section button {
+    div[class*="st-key-ph-step-"] .stFileUploader section button {
         background-color: transparent !important;
         color: #FFFFFF !important;
         border: 1.5px solid #FFFFFF !important;
         border-radius: 0px !important;
     }
-    .ph-block .stFileUploader section button:hover {
+    div[class*="st-key-ph-step-"] .stFileUploader section button:hover {
         background-color: #F6C945 !important;
         color: #000000 !important;
         border-color: #F6C945 !important;
     }
-    .ph-block .stFileUploader footer { display: none !important; }
-    .ph-block [data-testid="stFileUploaderFileName"] { color: #FFFFFF !important; }
+    div[class*="st-key-ph-step-"] .stFileUploader footer { display: none !important; }
+    div[class*="st-key-ph-step-"] [data-testid="stFileUploaderFileName"] { color: #FFFFFF !important; }
 
     /* ---------- BADGES DE STATUT (appariement) ---------- */
     .ph-badge {
@@ -279,16 +283,24 @@ st.markdown(
 )
 
 
-def block_start(eyebrow: str, title: str, desc: str = "") -> None:
-    st.markdown('<div class="ph-block">', unsafe_allow_html=True)
-    st.markdown(f'<p class="ph-step-eyebrow">{eyebrow}</p>', unsafe_allow_html=True)
-    st.markdown(f'<p class="ph-block-title">{title}</p>', unsafe_allow_html=True)
-    if desc:
-        st.markdown(f'<p class="ph-block-desc">{desc}</p>', unsafe_allow_html=True)
+from contextlib import contextmanager
 
 
-def block_end() -> None:
-    st.markdown("</div>", unsafe_allow_html=True)
+@contextmanager
+def ph_block(key: str, eyebrow: str, title: str, desc: str = ""):
+    """
+    Un vrai bloc noir qui englobe TOUT son contenu (titres, uploaders,
+    images...). st.container(key=...) génère une classe CSS `st-key-<key>`
+    sur le conteneur réel du DOM — contrairement à un <div> ouvert/fermé
+    dans deux st.markdown() séparés, qui ne peut pas envelopper les
+    widgets Streamlit intercalés.
+    """
+    with st.container(key=key):
+        st.markdown(f'<p class="ph-step-eyebrow">{eyebrow}</p>', unsafe_allow_html=True)
+        st.markdown(f'<p class="ph-block-title">{title}</p>', unsafe_allow_html=True)
+        if desc:
+            st.markdown(f'<p class="ph-block-desc">{desc}</p>', unsafe_allow_html=True)
+        yield
 
 
 # ============================================================
@@ -469,67 +481,67 @@ def build_manifest(match: MatchResult, template_name: str) -> dict:
 # 6. ÉTAPE 1 — TEMPLATE
 # ============================================================
 
-block_start(
+with ph_block(
+    "ph-step-1",
     "⚡ ÉTAPE 1",
     "LE TEMPLATE",
     "Déposez le poster de référence (.jpg). Nano Banana Pro s'appuiera "
     "dessus pour ne remplacer que le personnage.",
-)
-template_file = st.file_uploader(
-    "template", type=["jpg", "jpeg"], key="template", label_visibility="collapsed"
-)
-if template_file:
-    st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-    tcol1, tcol2 = st.columns([1, 3])
-    with tcol1:
-        st.image(template_file, caption=template_file.name, width=180)
-    with tcol2:
-        tmpl_img = Image.open(template_file)
-        st.markdown(
-            f"""
-            <p class="ph-asset-title">Format de sortie visé</p>
-            <p class="ph-asset-desc" style="opacity:0.9;">
-            {PRINT_WIDTH_CM} × {PRINT_HEIGHT_CM} cm · {PRINT_DPI} dpi · {COLOR_PROFILE}<br>
-            Soit {PRINT_WIDTH_PX} × {PRINT_HEIGHT_PX} px en sortie finale.<br><br>
-            Template importé : {tmpl_img.width} × {tmpl_img.height} px
-            </p>
-            """,
-            unsafe_allow_html=True,
-        )
-block_end()
+):
+    template_file = st.file_uploader(
+        "template", type=["jpg", "jpeg"], key="template", label_visibility="collapsed"
+    )
+    if template_file:
+        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+        tcol1, tcol2 = st.columns([1, 3])
+        with tcol1:
+            st.image(template_file, caption=template_file.name, width=180)
+        with tcol2:
+            tmpl_img = Image.open(template_file)
+            st.markdown(
+                f"""
+                <p class="ph-asset-title">Format de sortie visé</p>
+                <p class="ph-asset-desc" style="opacity:0.9;">
+                {PRINT_WIDTH_CM} × {PRINT_HEIGHT_CM} cm · {PRINT_DPI} dpi · {COLOR_PROFILE}<br>
+                Soit {PRINT_WIDTH_PX} × {PRINT_HEIGHT_PX} px en sortie finale.<br><br>
+                Template importé : {tmpl_img.width} × {tmpl_img.height} px
+                </p>
+                """,
+                unsafe_allow_html=True,
+            )
 
 # ============================================================
 # 7. ÉTAPE 2 — PHOTOS JOUEURS
 # ============================================================
 
-block_start(
+with ph_block(
+    "ph-step-2",
     "⚡ ÉTAPE 2",
     "LES PHOTOS JOUEURS",
     "Même nombre de photos dans chaque bloc, mêmes noms de fichiers si "
     "possible, et dans l'ordre chronologique — pour un appariement fiable.",
-)
-c1, c2 = st.columns(2)
-with c1:
-    st.markdown('<p class="ph-asset-title">👤 Portraits</p>', unsafe_allow_html=True)
-    st.markdown('<p class="ph-asset-desc">Glissez les visages ici</p>', unsafe_allow_html=True)
-    portraits_files = st.file_uploader(
-        "portraits",
-        accept_multiple_files=True,
-        type=["jpg", "jpeg", "png"],
-        key="portraits",
-        label_visibility="collapsed",
-    )
-with c2:
-    st.markdown('<p class="ph-asset-title">🏃 Photos en pieds</p>', unsafe_allow_html=True)
-    st.markdown('<p class="ph-asset-desc">Glissez les actions ici</p>', unsafe_allow_html=True)
-    pieds_files = st.file_uploader(
-        "pieds",
-        accept_multiple_files=True,
-        type=["jpg", "jpeg", "png"],
-        key="pieds",
-        label_visibility="collapsed",
-    )
-block_end()
+):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown('<p class="ph-asset-title">👤 Portraits</p>', unsafe_allow_html=True)
+        st.markdown('<p class="ph-asset-desc">Glissez les visages ici</p>', unsafe_allow_html=True)
+        portraits_files = st.file_uploader(
+            "portraits",
+            accept_multiple_files=True,
+            type=["jpg", "jpeg", "png"],
+            key="portraits",
+            label_visibility="collapsed",
+        )
+    with c2:
+        st.markdown('<p class="ph-asset-title">🏃 Photos en pieds</p>', unsafe_allow_html=True)
+        st.markdown('<p class="ph-asset-desc">Glissez les actions ici</p>', unsafe_allow_html=True)
+        pieds_files = st.file_uploader(
+            "pieds",
+            accept_multiple_files=True,
+            type=["jpg", "jpeg", "png"],
+            key="pieds",
+            label_visibility="collapsed",
+        )
 
 # ============================================================
 # 8. ÉTAPE 3 — VÉRIFICATION DE L'APPARIEMENT
@@ -546,55 +558,53 @@ if template_file and portraits_files and pieds_files:
         [f.name for f in portraits_files], [f.name for f in pieds_files]
     )
 
-    block_start(
+    with ph_block(
+        "ph-step-3",
         "⚡ ÉTAPE 3",
         "VÉRIFICATION DE L'APPARIEMENT",
         f"{len(match.pairs)} paire(s) détectée(s) sur "
         f"{len(portraits_files)} portrait(s) / {len(pieds_files)} photo(s) en pieds.",
-    )
+    ):
+        n_by_name = sum(1 for p in match.pairs if p.match_type == "nom")
+        n_by_order = sum(1 for p in match.pairs if p.match_type == "ordre")
+        st.markdown(
+            f'<span class="ph-badge ph-badge-ok">{n_by_name} par nom identique</span> '
+            f'<span class="ph-badge ph-badge-order">{n_by_order} par ordre chrono.</span>',
+            unsafe_allow_html=True,
+        )
 
-    n_by_name = sum(1 for p in match.pairs if p.match_type == "nom")
-    n_by_order = sum(1 for p in match.pairs if p.match_type == "ordre")
-    st.markdown(
-        f'<span class="ph-badge ph-badge-ok">{n_by_name} par nom identique</span> '
-        f'<span class="ph-badge ph-badge-order">{n_by_order} par ordre chrono.</span>',
-        unsafe_allow_html=True,
-    )
-
-    if match.orphan_portraits or match.orphan_pieds:
-        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-        if match.orphan_portraits:
-            st.warning(
-                "Portrait(s) sans photo en pieds correspondante : "
-                + ", ".join(match.orphan_portraits)
-            )
-        if match.orphan_pieds:
-            st.warning(
-                "Photo(s) en pieds sans portrait correspondant : "
-                + ", ".join(match.orphan_pieds)
-            )
-
-    if match.pairs:
-        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-        grid = st.columns(8)
-        for i, p in enumerate(match.pairs):
-            with grid[i % 8]:
-                st.markdown('<div class="ph-pair-card">', unsafe_allow_html=True)
-                ic1, ic2 = st.columns(2)
-                with ic1:
-                    st.image(str(DIR_PORTRAITS / p.portrait_name), width=70)
-                with ic2:
-                    st.image(str(DIR_PIEDS / p.pieds_name), width=70)
-                badge_cls = "ph-badge-ok" if p.match_type == "nom" else "ph-badge-order"
-                badge_txt = "NOM" if p.match_type == "nom" else "ORDRE"
-                st.markdown(
-                    f'<span class="ph-badge {badge_cls}">{badge_txt}</span>'
-                    f'<p class="ph-pair-name">{p.athlete}</p>',
-                    unsafe_allow_html=True,
+        if match.orphan_portraits or match.orphan_pieds:
+            st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+            if match.orphan_portraits:
+                st.warning(
+                    "Portrait(s) sans photo en pieds correspondante : "
+                    + ", ".join(match.orphan_portraits)
                 )
-                st.markdown("</div>", unsafe_allow_html=True)
+            if match.orphan_pieds:
+                st.warning(
+                    "Photo(s) en pieds sans portrait correspondant : "
+                    + ", ".join(match.orphan_pieds)
+                )
 
-    block_end()
+        if match.pairs:
+            st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+            grid = st.columns(8)
+            for i, p in enumerate(match.pairs):
+                with grid[i % 8]:
+                    st.markdown('<div class="ph-pair-card">', unsafe_allow_html=True)
+                    ic1, ic2 = st.columns(2)
+                    with ic1:
+                        st.image(str(DIR_PORTRAITS / p.portrait_name), width=70)
+                    with ic2:
+                        st.image(str(DIR_PIEDS / p.pieds_name), width=70)
+                    badge_cls = "ph-badge-ok" if p.match_type == "nom" else "ph-badge-order"
+                    badge_txt = "NOM" if p.match_type == "nom" else "ORDRE"
+                    st.markdown(
+                        f'<span class="ph-badge {badge_cls}">{badge_txt}</span>'
+                        f'<p class="ph-pair-name">{p.athlete}</p>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
 # 9. LANCEMENT & ÉTAPE 4 — RÉCUPÉRATION
@@ -623,31 +633,29 @@ if match and match.pairs:
         with open(DIR_OUTPUT / "manifest.json", "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
 
-        block_start(
+        with ph_block(
+            "ph-step-4",
             "📥 ÉTAPE 4",
             "RÉCUPÉRATION",
             "Aperçus de staging (contrôle d'appariement) + manifeste de "
             "génération prêt à brancher sur Nano Banana Pro.",
-        )
+        ):
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w") as z:
+                for f in DIR_OUTPUT.glob("*"):
+                    z.write(f, arcname=f.name)
 
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w") as z:
-            for f in DIR_OUTPUT.glob("*"):
-                z.write(f, arcname=f.name)
+            st.download_button(
+                "📦 TÉLÉCHARGER LE PACK ZIP COMPLET",
+                data=zip_buf.getvalue(),
+                file_name="POSTER_HEROES_STAGING.zip",
+                mime="application/zip",
+            )
 
-        st.download_button(
-            "📦 TÉLÉCHARGER LE PACK ZIP COMPLET",
-            data=zip_buf.getvalue(),
-            file_name="POSTER_HEROES_STAGING.zip",
-            mime="application/zip",
-        )
-
-        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-        st.markdown('<p class="ph-asset-title">🗂️ Aperçu unitaire</p>', unsafe_allow_html=True)
-        grid = st.columns(8)
-        for i, pair in enumerate(match.pairs):
-            out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_STAGING.jpg"
-            with grid[i % 8]:
-                st.image(str(out_path), caption=pair.athlete, width=170)
-
-        block_end()
+            st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+            st.markdown('<p class="ph-asset-title">🗂️ Aperçu unitaire</p>', unsafe_allow_html=True)
+            grid = st.columns(8)
+            for i, pair in enumerate(match.pairs):
+                out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_STAGING.jpg"
+                with grid[i % 8]:
+                    st.image(str(out_path), caption=pair.athlete, width=170)
