@@ -18,17 +18,28 @@ st.write("Machine d'automatisation d'imagerie connectée à l'API Nano Banana Pr
 
 # --- INITIALISATION DES DOSSIERS TEMPORAIRES ---
 def init_folders():
-    for folder in ["temp_portraits", "temp_pieds", "temp_sorties"]:
+    for folder in ["temp_portraits", "temp_pieds", "temp_template", "temp_sorties"]:
         if not os.path.exists(folder):
             os.makedirs(folder)
 
 init_folders()
 
 # --- INTERFACE DE TÉLÉVERSEMENT ---
+st.subheader("🎨 1. Chargement du Template Graphique")
+template_file = st.file_uploader(
+    "Glissez le FOND DE POSTER (Template vierge) ici", 
+    accept_multiple_files=False, 
+    type=["jpg", "jpeg", "png", "psd"],
+    key="template"
+)
+
+st.write("---")
+st.subheader("📸 2. Chargement des Photos des Joueurs")
+
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("📸 1. Dossier PORTRAITS")
+    st.write("📂 **Dossier PORTRAITS**")
     portraits_files = st.file_uploader(
         "Glissez les portraits ici", 
         accept_multiple_files=True, 
@@ -37,7 +48,7 @@ with col1:
     )
 
 with col2:
-    st.subheader("🏃‍♂️ 2. Dossier PHOTOS EN PIEDS")
+    st.write("📂 **Dossier PHOTOS EN PIEDS**")
     pieds_files = st.file_uploader(
         "Glissez les photos en pieds ici", 
         accept_multiple_files=True, 
@@ -46,14 +57,21 @@ with col2:
     )
 
 # --- SAUVEGARDE ET APPARIEMENT ---
-if portraits_files and pieds_files:
-    # Sauvegarde locale temporaire pour traitement
+if template_file and portraits_files and pieds_files:
+    
+    # Sauvegarde du template de fond
+    template_path = os.path.join("temp_template", template_file.name)
+    with open(template_path, "wb") as buffer:
+        buffer.write(template_file.read())
+        
+    # Sauvegarde locale temporaire des portraits
     portraits_dict = {}
     for f in portraits_files:
         with open(os.path.join("temp_portraits", f.name), "wb") as buffer:
             buffer.write(f.read())
         portraits_dict[f.name] = os.path.join("temp_portraits", f.name)
         
+    # Sauvegarde locale temporaire des photos en pieds
     pieds_dict = {}
     for f in pieds_files:
         with open(os.path.join("temp_pieds", f.name), "wb") as buffer:
@@ -67,55 +85,48 @@ if portraits_files and pieds_files:
             paires_valides.append(name)
 
     # Affichage du statut d'appariement
-    st.success(f"🔗 Correspondance établie : {len(paires_valides)} paires détectées avec succès sur la base du nom exact.")
+    st.success(f"🔗 Template chargé : {template_file.name} | Correspondance établie : {len(paires_valides)} paires de joueurs détectées.")
     
     if len(paires_valides) < len(portraits_dict):
-        st.warning(f"⚠️ Attention : {len(portraits_dict) - len(paires_valides)} portraits ou photos en pieds n'ont pas trouvé de correspondance exacte par nom.")
+        st.warning(f"⚠️ Attention : {len(portraits_dict) - len(paires_valides)} portraits ou photos en pieds n'ont pas de correspondance exacte par le nom.")
 
-    # --- SIMULATION OU APPEL API NANO BANANA PRO ---
-    # Note technique : Remplacer cette fonction par votre appel d'API Vertex AI / Google AI Studio effectif.
-    def call_nano_banana_api(portrait_path, pieds_path):
-        # En production, ce bloc envoie les images par requêtes POST HTTP sécurisées
-        # exemple : 
-        # response = requests.post("https://api.google.com/nano-banana/v3/generate", files=...)
-        time.sleep(1.5) # Simulation du temps de calcul IA par poster
+    # --- SIMULATION APPEL API NANO BANANA PRO ---
+    def call_nano_banana_api(portrait_path, pieds_path, bg_template_path):
+        # Simulation du traitement IA (Détourage + Incrustation sur le template + Lumière)
+        time.sleep(1.2) 
         
-        # Pour le test, on simule la création du poster en superposant une image ou en retournant un duplicata
+        # Pour le test, on retourne l'image du portrait simulée
         img_portrait = Image.open(portrait_path)
         return img_portrait
 
-    # --- BOUTON DE SÉCURITÉ : LANCEMENT DE LA PRODUCTION ---
+    # --- BOUTON DE LANCEMENT DE LA PRODUCTION ---
     if st.button("🔥 LANCER LA PRODUCTION EN MASSE"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Conteneur visuel pour suivre l'avancée réelle
-        grille_status = st.container()
-        
         for idx, filename in enumerate(paires_valides):
-            status_text.text(f"Traitement en cours par l'API : {filename} ({idx+1}/{len(paires_valides)})")
+            status_text.text(f"Fusion IA en cours : {filename} ({idx+1}/{len(paires_valides)})")
             
             p_path = portraits_dict[filename]
             f_path = pieds_dict[filename]
             
-            # Appel API
-            poster_image = call_nano_banana_api(p_path, f_path)
+            # Appel API avec passage du template
+            poster_image = call_nano_banana_api(p_path, f_path, template_path)
             
-            # Renommage Intelligent Strict (Prend exactement le nom de la photo portrait d'origine)
+            # Renommage Intelligent Strict
             output_filename = filename
             output_path = os.path.join("temp_sorties", output_filename)
             poster_image.save(output_path)
             
-            # Mise à jour de la barre de progression
             progress_bar.progress((idx + 1) / len(paires_valides))
             
-        status_text.text("✅ Production terminée ! Tous les posters ont été générés et renommés.")
+        status_text.text("✅ Production terminée ! Tous les posters ont été fusionnés sur le template et renommés.")
         
-        # --- ETAPE DE TÉLÉCHARGEMENT ---
+        # --- ENREGISTREMENT ET TÉLÉCHARGEMENT ---
         st.write("---")
         st.subheader("📥 3. Zone de Récupération des Posters")
         
-        # Génération du Pack ZIP Global
+        # Création du ZIP complet
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zip_file:
             for filename in paires_valides:
@@ -130,8 +141,8 @@ if portraits_files and pieds_files:
             mime="application/zip"
         )
         
-        # Grille de téléchargement unitaire avec aperçu
-        st.write("### Aperçu individuel et téléchargement unitaire :")
+        # Galerie d'aperçus
+        st.write("### Aperçu individuel :")
         cols_preview = st.columns(4)
         for idx, filename in enumerate(paires_valides):
             file_path = os.path.join("temp_sorties", filename)
@@ -146,4 +157,4 @@ if portraits_files and pieds_files:
                         key=f"dl_{filename}"
                     )
 else:
-    st.info("💡 En attente du dépôt des deux dossiers (Portraits et Pieds) pour lancer l'appariement automatique.")
+    st.info("💡 Pour activer la machine, dépose :
