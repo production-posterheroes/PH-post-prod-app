@@ -8,13 +8,13 @@ import zipfile
 
 # Configuration de la page Streamlit
 st.set_page_config(
-    page_title="POSTER HEROES - Production Locale",
+    page_title="POSTER HEROES",
     page_icon="🚀",
     layout="wide"
 )
 
-st.title("🚀 POSTER HEROES — Plateforme de Post-Production Locale")
-st.write("Machine d'automatisation d'imagerie connectée à l'API Nano Banana Pro (Gemini Image API).")
+st.title("🚀 POSTER HEROES — Post-Production Locale")
+st.write("Machine connectée à l'API Nano Banana Pro (Gemini Image API).")
 
 # --- INITIALISATION DES DOSSIERS TEMPORAIRES ---
 def init_folders():
@@ -29,7 +29,7 @@ st.subheader("🎨 1. Chargement du Template Graphique")
 template_file = st.file_uploader(
     "Glissez le FOND DE POSTER (Template vierge) ici", 
     accept_multiple_files=False, 
-    type=["jpg", "jpeg", "png", "psd"],
+    type=["jpg", "jpeg", "png"],
     key="template"
 )
 
@@ -59,45 +59,36 @@ with col2:
 # --- SAUVEGARDE ET APPARIEMENT ---
 if template_file and portraits_files and pieds_files:
     
-    # Sauvegarde du template de fond
     template_path = os.path.join("temp_template", template_file.name)
     with open(template_path, "wb") as buffer:
         buffer.write(template_file.read())
         
-    # Sauvegarde locale temporaire des portraits
     portraits_dict = {}
     for f in portraits_files:
         with open(os.path.join("temp_portraits", f.name), "wb") as buffer:
             buffer.write(f.read())
         portraits_dict[f.name] = os.path.join("temp_portraits", f.name)
         
-    # Sauvegarde locale temporaire des photos en pieds
     pieds_dict = {}
     for f in pieds_files:
         with open(os.path.join("temp_pieds", f.name), "wb") as buffer:
             buffer.write(f.read())
         pieds_dict[f.name] = os.path.join("temp_pieds", f.name)
 
-    # Détection des paires valides par nom exact
     paires_valides = []
     for name in portraits_dict.keys():
         if name in pieds_dict:
             paires_valides.append(name)
 
-    # Affichage du statut d'appariement
-    st.success(f"🔗 Template chargé : {template_file.name} | Correspondance établie : {len(paires_valides)} paires de joueurs détectées.")
+    st.success(f"🔗 Template chargé. Correspondance établie : {len(paires_valides)} paires détectées.")
     
     if len(paires_valides) < len(portraits_dict):
-        st.warning(f"⚠️ Attention : {len(portraits_dict) - len(paires_valides)} portraits ou photos en pieds n'ont pas de correspondance exacte par le nom.")
+        st.warning("⚠️ Attention : Certaines images n'ont pas de correspondance exacte.")
 
     # --- SIMULATION APPEL API NANO BANANA PRO ---
     def call_nano_banana_api(portrait_path, pieds_path, bg_template_path):
-        # Simulation du traitement IA (Détourage + Incrustation sur le template + Lumière)
         time.sleep(1.2) 
-        
-        # Pour le test, on retourne l'image du portrait simulée
-        img_portrait = Image.open(portrait_path)
-        return img_portrait
+        return Image.open(portrait_path)
 
     # --- BOUTON DE LANCEMENT DE LA PRODUCTION ---
     if st.button("🔥 LANCER LA PRODUCTION EN MASSE"):
@@ -105,28 +96,24 @@ if template_file and portraits_files and pieds_files:
         status_text = st.empty()
         
         for idx, filename in enumerate(paires_valides):
-            status_text.text(f"Fusion IA en cours : {filename} ({idx+1}/{len(paires_valides)})")
+            status_text.text(f"Fusion IA : {filename} ({idx+1}/{len(paires_valides)})")
             
             p_path = portraits_dict[filename]
             f_path = pieds_dict[filename]
             
-            # Appel API avec passage du template
             poster_image = call_nano_banana_api(p_path, f_path, template_path)
             
-            # Renommage Intelligent Strict
-            output_filename = filename
-            output_path = os.path.join("temp_sorties", output_filename)
+            output_path = os.path.join("temp_sorties", filename)
             poster_image.save(output_path)
             
             progress_bar.progress((idx + 1) / len(paires_valides))
             
-        status_text.text("✅ Production terminée ! Tous les posters ont été fusionnés sur le template et renommés.")
+        status_text.text("✅ Production terminée ! Tous les posters ont été renommés.")
         
-        # --- ENREGISTREMENT ET TÉLÉCHARGEMENT ---
+        # --- TÉLÉCHARGEMENT ---
         st.write("---")
         st.subheader("📥 3. Zone de Récupération des Posters")
         
-        # Création du ZIP complet
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zip_file:
             for filename in paires_valides:
@@ -141,7 +128,6 @@ if template_file and portraits_files and pieds_files:
             mime="application/zip"
         )
         
-        # Galerie d'aperçus
         st.write("### Aperçu individuel :")
         cols_preview = st.columns(4)
         for idx, filename in enumerate(paires_valides):
@@ -150,11 +136,11 @@ if template_file and portraits_files and pieds_files:
                 st.image(file_path, caption=filename, use_container_width=True)
                 with open(file_path, "rb") as file_bytes:
                     st.download_button(
-                        label=f"Télécharger",
+                        label="Télécharger",
                         data=file_bytes,
                         file_name=filename,
                         mime="image/jpeg",
                         key=f"dl_{filename}"
                     )
 else:
-    st.info("💡 Pour activer la machine, dépose :
+    st.info("💡 En attente du dépôt requis : 1 Template + Portraits + Photos en pieds.")
