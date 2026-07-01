@@ -502,12 +502,25 @@ def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -
             if inline is not None and inline.data:
                 return Image.open(io.BytesIO(inline.data)).convert("RGB")
 
-    # Pas d'image dans la réponse : on remonte le texte éventuel pour debug
+    # Pas d'image : on récupère un maximum de diagnostic avant de lever l'erreur
+    diagnostics = []
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    if prompt_feedback is not None:
+        block_reason = getattr(prompt_feedback, "block_reason", None)
+        if block_reason:
+            diagnostics.append(f"prompt bloqué : {block_reason}")
+
+    for candidate in candidates:
+        finish_reason = getattr(candidate, "finish_reason", None)
+        if finish_reason and str(finish_reason) not in ("STOP", "FinishReason.STOP"):
+            diagnostics.append(f"finish_reason : {finish_reason}")
+
     text_fallback = getattr(response, "text", None)
-    raise RuntimeError(
-        "Le modèle n'a renvoyé aucune image."
-        + (f" Réponse : {text_fallback[:200]}" if text_fallback else "")
-    )
+    if text_fallback:
+        diagnostics.append(f"texte renvoyé : {text_fallback[:200]}")
+
+    detail = " | ".join(diagnostics) if diagnostics else "aucune information de diagnostic disponible"
+    raise RuntimeError(f"Le modèle n'a renvoyé aucune image ({detail}).")
 
 
 def generate_poster_placeholder(pair: Pair, template_path: Path) -> Image.Image:
