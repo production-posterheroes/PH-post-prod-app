@@ -11,6 +11,7 @@ unique à brancher sur Nano Banana Pro dans une prochaine itération — voir
 la fonction `generate_poster_placeholder()` en bas de fichier.
 """
 
+import base64
 import io
 import json
 import re
@@ -21,6 +22,14 @@ from pathlib import Path
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
 
 # ============================================================
 # 1. CONFIGURATION GÉNÉRALE & SPEC D'IMPRESSION
@@ -408,6 +417,75 @@ def save_uploads(files, folder: Path) -> None:
 # ============================================================
 
 
+# ============================================================
+# 5bis. GÉNÉRATION RÉELLE — NANO BANANA PRO (Gemini 3 Pro Image)
+# ============================================================
+
+NANO_BANANA_MODEL = "gemini-3-pro-image-preview"
+PRICE_PER_IMAGE_4K_USD = 0.24  # tarif indicatif, sortie 4K, à vérifier périodiquement
+
+DEFAULT_PROMPT = (
+    "Tu reçois trois images : (1) un poster sportif de référence, (2) le "
+    "portrait d'un athlète, (3) une photo de cet athlète en action / en pieds. "
+    "Recompose EXACTEMENT le poster (1) à l'identique — mise en page, "
+    "typographies, logos, couleurs, décor, effets — en remplaçant uniquement "
+    "le personnage présent sur le poster par ce nouvel athlète, en fusionnant "
+    "naturellement son visage (2) avec sa posture/action (3). Ne modifie rien "
+    "d'autre sur le poster. Éclairage et perspective cohérents avec le décor "
+    "d'origine. Rendu final net, qualité studio, sans filigrane."
+)
+
+
+@st.cache_resource(show_spinner=False)
+def get_genai_client():
+    """Client mis en cache pour toute la session Streamlit."""
+    if not GENAI_AVAILABLE:
+        return None
+    api_key = st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") else None
+    if not api_key:
+        return None
+    return genai.Client(api_key=api_key)
+
+
+def _image_part(path: Path):
+    data = path.read_bytes()
+    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    return genai_types.Part.from_bytes(data=data, mime_type=mime)
+
+
+def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -> Image.Image:
+    """
+    Appel réel à Nano Banana Pro. Envoie template + portrait + pieds en une
+    seule requête multi-images, récupère l'image générée dans la réponse.
+    Lève une exception explicite en cas d'échec (quota, facturation, réseau,
+    réponse sans image) — à charge de l'appelant de l'afficher proprement.
+    """
+    response = client.models.generate_content(
+        model=NANO_BANANA_MODEL,
+        contents=[
+            prompt,
+            _image_part(template_path),
+            _image_part(DIR_PORTRAITS / pair.portrait_name),
+            _image_part(DIR_PIEDS / pair.pieds_name),
+        ],
+    )
+
+    candidates = getattr(response, "candidates", None) or []
+    for candidate in candidates:
+        parts = getattr(candidate.content, "parts", None) or []
+        for part in parts:
+            inline = getattr(part, "inline_data", None)
+            if inline is not None and inline.data:
+                return Image.open(io.BytesIO(inline.data)).convert("RGB")
+
+    # Pas d'image dans la réponse : on remonte le texte éventuel pour debug
+    text_fallback = getattr(response, "text", None)
+    raise RuntimeError(
+        "Le modèle n'a renvoyé aucune image."
+        + (f" Réponse : {text_fallback[:200]}" if text_fallback else "")
+    )
+
+
 def generate_poster_placeholder(pair: Pair, template_path: Path) -> Image.Image:
     """
     ⚠️ PLACEHOLDER — pas d'appel IA ici.
@@ -611,6 +689,29 @@ if template_file and portraits_files and pieds_files:
 # ============================================================
 
 if match and match.pairs:
+    client = get_genai_client()
+
+    st.markdown('<hr class="ph-divider" style="border-top-color: rgba(0,0,0,0.2);">', unsafe_allow_html=True)
+
+    mode_options = ["🧪 Mode test (staging, gratuit)"]
+    if client is not None:
+        mode_options.append("⚡ Génération réelle (Nano Banana Pro, payant)")
+    else:
+        st.info(
+            "Clé API absente ou SDK non installé — seul le mode test est "
+            "disponible. Vérifiez `.streamlit/secrets.toml` et `pip install google-genai`."
+        )
+
+    mode = st.radio("Mode de production", mode_options, label_visibility="collapsed")
+    real_mode = mode.startswith("⚡")
+
+    if real_mode:
+        estimate = len(match.pairs) * PRICE_PER_IMAGE_4K_USD
+        st.warning(
+            f"Coût estimé pour {len(match.pairs)} poster(s) en 4K : "
+            f"environ {estimate:.2f} $ (tarif indicatif Nano Banana Pro, à vérifier)."
+        )
+
     launch = st.button(f"PRODUIRE LES {len(match.pairs)} POSTERS")
 
     if launch:
@@ -619,17 +720,35 @@ if match and match.pairs:
 
         bar = st.progress(0, text="Préparation des jobs de génération…")
         template_path = DIR_TEMPLATE / template_file.name
+        errors = []
 
         for idx, pair in enumerate(match.pairs):
-            preview = generate_poster_placeholder(pair, template_path)
-            out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_STAGING.jpg"
-            preview.save(out_path, quality=92)
+            suffix = "POSTER" if real_mode else "STAGING"
+            out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_{suffix}.jpg"
+            try:
+                if real_mode:
+                    result_img = generate_poster_real(
+                        pair, template_path, client, DEFAULT_PROMPT
+                    )
+                else:
+                    result_img = generate_poster_placeholder(pair, template_path)
+                result_img.save(out_path, quality=95)
+            except Exception as exc:
+                errors.append(f"{pair.athlete} : {exc}")
             bar.progress(
                 (idx + 1) / len(match.pairs),
                 text=f"{pair.athlete} ({idx + 1}/{len(match.pairs)})",
             )
 
+        if errors:
+            st.error(
+                "Échec sur "
+                + f"{len(errors)}/{len(match.pairs)} poster(s) :\n\n"
+                + "\n".join(f"- {e}" for e in errors)
+            )
+
         manifest = build_manifest(match, template_file.name)
+        manifest["status"] = "GENERATED" if real_mode else "STAGING_ONLY"
         with open(DIR_OUTPUT / "manifest.json", "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
 
@@ -637,25 +756,34 @@ if match and match.pairs:
             "ph-step-4",
             "📥 ÉTAPE 4",
             "RÉCUPÉRATION",
-            "Aperçus de staging (contrôle d'appariement) + manifeste de "
-            "génération prêt à brancher sur Nano Banana Pro.",
+            (
+                "Posters générés par Nano Banana Pro, prêts à l'impression."
+                if real_mode
+                else "Aperçus de staging (contrôle d'appariement) — mode test, "
+                "aucun appel API facturé."
+            ),
         ):
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w") as z:
                 for f in DIR_OUTPUT.glob("*"):
                     z.write(f, arcname=f.name)
 
+            zip_name = "POSTER_HEROES_POSTERS.zip" if real_mode else "POSTER_HEROES_STAGING.zip"
             st.download_button(
                 "📦 TÉLÉCHARGER LE PACK ZIP COMPLET",
                 data=zip_buf.getvalue(),
-                file_name="POSTER_HEROES_STAGING.zip",
+                file_name=zip_name,
                 mime="application/zip",
             )
 
             st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
             st.markdown('<p class="ph-asset-title">🗂️ Aperçu unitaire</p>', unsafe_allow_html=True)
             grid = st.columns(8)
+            suffix = "POSTER" if real_mode else "STAGING"
             for i, pair in enumerate(match.pairs):
-                out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_STAGING.jpg"
+                out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_{suffix}.jpg"
                 with grid[i % 8]:
-                    st.image(str(out_path), caption=pair.athlete, width=170)
+                    if out_path.exists():
+                        st.image(str(out_path), caption=pair.athlete, width=170)
+                    else:
+                        st.caption(f"❌ {pair.athlete}")
