@@ -95,12 +95,14 @@ st.markdown(
 
     /* ---------- BLOCS NOIRS (une étape = un bloc) ---------- */
     .ph-block {
-        background-color: #0A0A0A !important;
-        border: 2px solid #000000;
-        padding: 32px 36px !important;
-        margin-bottom: 28px !important;
+        background-color: #000000 !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 30px 34px !important;
+        margin-bottom: 24px !important;
         border-radius: 0px !important;
     }
+    .ph-block * { border-radius: 0px !important; }
     .ph-block, .ph-block p, .ph-block span, .ph-block label,
     .ph-block div, .ph-block small {
         color: #FFFFFF !important;
@@ -148,9 +150,11 @@ st.markdown(
         margin: 22px 0;
     }
 
-    /* ---------- UPLOADERS : bloc noir, pointillés blancs, texte blanc ---------- */
+    /* ---------- UPLOADERS : bloc noir pur, pointillés blancs, texte blanc ---------- */
+    .ph-block .stFileUploader,
+    .ph-block [data-testid="stFileUploaderDropzone"],
     .ph-block .stFileUploader section {
-        background-color: #0A0A0A !important;
+        background-color: #000000 !important;
         border: 2px dashed #FFFFFF !important;
         border-radius: 0px !important;
     }
@@ -190,10 +194,10 @@ st.markdown(
     .ph-badge-warn { background-color: #E4453A; color: #FFFFFF !important; }
 
     .ph-pair-card {
-        border: 1px solid rgba(255,255,255,0.25);
-        padding: 12px;
-        margin-bottom: 16px;
-        background-color: #141414;
+        border: 1px solid rgba(255,255,255,0.2);
+        padding: 8px;
+        margin-bottom: 12px;
+        background-color: #000000;
     }
     .ph-pair-name {
         font-family: 'Anton', sans-serif !important;
@@ -244,6 +248,31 @@ st.markdown(
     /* ---------- PROGRESS BAR ---------- */
     .stProgress > div > div > div > div { background-color: #F6C945 !important; }
     .stProgress > div > div > div { background-color: #333333 !important; }
+    .ph-header {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        margin-top: 6px;
+        margin-bottom: 26px;
+    }
+    .ph-header-title {
+        font-family: 'Anton', sans-serif !important;
+        font-size: 22px !important;
+        color: #000000 !important;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        margin: 0;
+    }
+    .ph-header-sub {
+        font-family: 'Archivo', sans-serif !important;
+        font-size: 11px !important;
+        color: #000000 !important;
+        opacity: 0.65;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        margin: 0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -266,20 +295,28 @@ def block_end() -> None:
 # 3. HEADER
 # ============================================================
 
-col_l1, col_l2, col_l3 = st.columns([1, 1.6, 1])
-with col_l2:
-    logo_path = APP_DIR / "logo7.png"
-    if logo_path.exists():
-        st.image(str(logo_path), use_container_width=True)
-    else:
-        st.markdown(
-            "<h1 style='font-family:Anton;text-align:center;'>POSTER HEROES</h1>",
-            unsafe_allow_html=True,
-        )
-st.markdown(
-    '<p class="sub-title">Post-Production Factory · V2.0</p>',
-    unsafe_allow_html=True,
-)
+icon_path = APP_DIR / "logo_icon.png"
+if icon_path.exists():
+    import base64
+
+    icon_b64 = base64.b64encode(icon_path.read_bytes()).decode()
+    st.markdown(
+        f"""
+        <div class="ph-header">
+            <img src="data:image/png;base64,{icon_b64}" style="height:34px;" />
+            <div>
+                <p class="ph-header-title">Poster Heroes</p>
+                <p class="ph-header-sub">Post-Production Factory · V2.0</p>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<div class="ph-header"><p class="ph-header-title">Poster Heroes</p></div>',
+        unsafe_allow_html=True,
+    )
 
 ensure_dirs()
 
@@ -443,9 +480,9 @@ template_file = st.file_uploader(
 )
 if template_file:
     st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-    tcol1, tcol2 = st.columns([1, 2])
+    tcol1, tcol2 = st.columns([1, 3])
     with tcol1:
-        st.image(template_file, caption=template_file.name, use_container_width=True)
+        st.image(template_file, caption=template_file.name, width=180)
     with tcol2:
         tmpl_img = Image.open(template_file)
         st.markdown(
@@ -539,15 +576,15 @@ if template_file and portraits_files and pieds_files:
 
     if match.pairs:
         st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-        grid = st.columns(4)
+        grid = st.columns(8)
         for i, p in enumerate(match.pairs):
-            with grid[i % 4]:
+            with grid[i % 8]:
                 st.markdown('<div class="ph-pair-card">', unsafe_allow_html=True)
                 ic1, ic2 = st.columns(2)
                 with ic1:
-                    st.image(str(DIR_PORTRAITS / p.portrait_name), use_container_width=True)
+                    st.image(str(DIR_PORTRAITS / p.portrait_name), width=70)
                 with ic2:
-                    st.image(str(DIR_PIEDS / p.pieds_name), use_container_width=True)
+                    st.image(str(DIR_PIEDS / p.pieds_name), width=70)
                 badge_cls = "ph-badge-ok" if p.match_type == "nom" else "ph-badge-order"
                 badge_txt = "NOM" if p.match_type == "nom" else "ORDRE"
                 st.markdown(
@@ -607,10 +644,10 @@ if match and match.pairs:
 
         st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
         st.markdown('<p class="ph-asset-title">🗂️ Aperçu unitaire</p>', unsafe_allow_html=True)
-        grid = st.columns(4)
+        grid = st.columns(8)
         for i, pair in enumerate(match.pairs):
             out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_STAGING.jpg"
-            with grid[i % 4]:
-                st.image(str(out_path), caption=pair.athlete, use_container_width=True)
+            with grid[i % 8]:
+                st.image(str(out_path), caption=pair.athlete, width=170)
 
         block_end()
