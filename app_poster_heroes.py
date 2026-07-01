@@ -1,196 +1,616 @@
 # -*- coding: utf-8 -*-
-import streamlit as st
-import os
-import time
-import io
-from PIL import Image
-import zipfile
+"""
+POSTER HEROES — POST-PRODUCTION FACTORY
+----------------------------------------
+Application locale Streamlit pour automatiser la fabrication des posters
+sportifs individuels (portrait + photo en pieds + template de référence).
 
-# 1. CONFIGURATION DE LA PAGE
+Cette version : design finalisé + logique métier (appariement, vérification,
+export) sans appel API. Le module `generate_poster` est le point d'entrée
+unique à brancher sur Nano Banana Pro dans une prochaine itération — voir
+la fonction `generate_poster_placeholder()` en bas de fichier.
+"""
+
+import io
+import json
+import re
+import shutil
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
+
+# ============================================================
+# 1. CONFIGURATION GÉNÉRALE & SPEC D'IMPRESSION
+# ============================================================
+
 st.set_page_config(
     page_title="POSTER HEROES - Factory",
     page_icon="⚡",
-    layout="wide"
+    layout="wide",
 )
 
-# 2. INJECTION CSS PROPRE ET IMPLIQUABLE (FORÇAGE GRAPHIQUE)
-st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Anton&display=swap');
+APP_DIR = Path(__file__).parent
+WORK_DIR = APP_DIR / ".ph_workdir"
+DIR_TEMPLATE = WORK_DIR / "template"
+DIR_PORTRAITS = WORK_DIR / "portraits"
+DIR_PIEDS = WORK_DIR / "pieds"
+DIR_OUTPUT = WORK_DIR / "sorties"
 
-    /* Fond jaune global */
-    .stApp, .main {
-        background-color: #f6c945 !important;
-    }
-    
-    /* Titre principal et sous-titres hors blocs */
-    .main-title {
-        font-family: 'Anton', sans-serif !important;
-        font-size: 70px !important;
-        text-align: center;
-        color: #000000 !important;
-        line-height: 1 !important;
-        margin-bottom: 0px;
-        text-transform: uppercase;
-    }
+# Spécification d'impression finale (utilisée pour le manifeste de génération)
+PRINT_WIDTH_CM = 60
+PRINT_HEIGHT_CM = 40
+PRINT_DPI = 300
+COLOR_PROFILE = "sRGB"
+
+
+def cm_to_px(cm: float, dpi: int = PRINT_DPI) -> int:
+    return round(cm / 2.54 * dpi)
+
+
+PRINT_WIDTH_PX = cm_to_px(PRINT_WIDTH_CM)
+PRINT_HEIGHT_PX = cm_to_px(PRINT_HEIGHT_CM)
+
+
+def ensure_dirs() -> None:
+    for d in (DIR_TEMPLATE, DIR_PORTRAITS, DIR_PIEDS, DIR_OUTPUT):
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def reset_run_dirs() -> None:
+    """Nettoie les dossiers de travail avant une nouvelle production."""
+    for d in (DIR_TEMPLATE, DIR_PORTRAITS, DIR_PIEDS, DIR_OUTPUT):
+        if d.exists():
+            shutil.rmtree(d)
+    ensure_dirs()
+
+
+# ============================================================
+# 2. DESIGN SYSTEM — BLOCS NOIRS / TITRES BLANCS / FOND JAUNE
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Anton&family=Archivo:wght@400;600;700&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Archivo', sans-serif; }
+
+    .stApp, .main { background-color: #F6C945 !important; }
+
+    /* ---------- HEADER ---------- */
     .sub-title {
         font-family: 'Anton', sans-serif !important;
-        font-size: 24px !important;
+        font-size: 20px !important;
         text-align: center;
         color: #000000 !important;
         text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-top: 5px;
-        margin-bottom: 30px;
-    }
-
-    /* CRÉATION DES BLOCS NOIRS ABSOLUS (MAQUETTE REF 1) */
-    .custom-black-block {
-        background-color: #000000 !important;
-        padding: 35px !important;
-        margin-bottom: 25px !important;
-        border-radius: 0px !important; /* Angles carrés */
-    }
-    
-    /* Titres Étape 1 & 2 en Blanc pur */
-    .block-title {
-        font-family: 'Anton', sans-serif !important;
-        color: #ffffff !important;
-        font-size: 32px !important;
-        text-transform: uppercase;
+        letter-spacing: 3px;
         margin-top: 0px;
-        margin-bottom: 5px;
-        letter-spacing: 1px;
-    }
-    .block-label {
-        color: #ffffff !important;
-        font-family: 'Arial', sans-serif;
-        font-size: 14px;
-        margin-bottom: 15px;
-    }
-    .asset-title {
-        font-family: 'Anton', sans-serif !important;
-        color: #ffffff !important;
-        font-size: 20px !important;
-        text-transform: uppercase;
-        margin-bottom: 5px;
+        margin-bottom: 35px;
+        opacity: 0.85;
     }
 
-    /* Customisation des zones d'upload : Fond Jaune / Pointillés Noirs */
-    .stFileUploader section {
-        background-color: #f6c945 !important;
-        border: 2px dashed #000000 !important;
+    /* ---------- BLOCS NOIRS (une étape = un bloc) ---------- */
+    .ph-block {
+        background-color: #0A0A0A !important;
+        border: 2px solid #000000;
+        padding: 32px 36px !important;
+        margin-bottom: 28px !important;
         border-radius: 0px !important;
     }
-    /* Couleur du texte à l'intérieur de la zone d'upload */
-    .stFileUploader section div, .stFileUploader section span, .stFileUploader section button {
-        color: #000000 !important;
+    .ph-block, .ph-block p, .ph-block span, .ph-block label,
+    .ph-block div, .ph-block small {
+        color: #FFFFFF !important;
     }
-    .stFileUploader footer {
-        display: none !important; /* Cache les mentions inutiles de Streamlit */
+    .ph-step-eyebrow {
+        font-family: 'Anton', sans-serif !important;
+        color: #F6C945 !important;
+        font-size: 14px !important;
+        letter-spacing: 3px;
+        margin-bottom: 2px;
+    }
+    .ph-block-title {
+        font-family: 'Anton', sans-serif !important;
+        color: #FFFFFF !important;
+        font-size: 30px !important;
+        text-transform: uppercase;
+        margin-top: 0px;
+        margin-bottom: 6px;
+        letter-spacing: 0.5px;
+    }
+    .ph-block-desc {
+        font-family: 'Archivo', sans-serif !important;
+        color: #FFFFFF !important;
+        opacity: 0.75;
+        font-size: 14px;
+        margin-bottom: 18px;
+    }
+    .ph-asset-title {
+        font-family: 'Anton', sans-serif !important;
+        color: #FFFFFF !important;
+        font-size: 17px !important;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+        letter-spacing: 0.5px;
+    }
+    .ph-asset-desc {
+        color: #FFFFFF !important;
+        opacity: 0.6;
+        font-size: 13px;
+        margin-bottom: 12px;
+    }
+    .ph-divider {
+        border: none;
+        border-top: 1px solid rgba(255,255,255,0.15);
+        margin: 22px 0;
     }
 
-    /* Bouton d'action principal POSTER HEROES */
+    /* ---------- UPLOADERS : bloc noir, pointillés blancs, texte blanc ---------- */
+    .ph-block .stFileUploader section {
+        background-color: #0A0A0A !important;
+        border: 2px dashed #FFFFFF !important;
+        border-radius: 0px !important;
+    }
+    .ph-block .stFileUploader section div,
+    .ph-block .stFileUploader section span,
+    .ph-block .stFileUploader small {
+        color: #FFFFFF !important;
+        opacity: 0.85;
+    }
+    .ph-block .stFileUploader section button {
+        background-color: transparent !important;
+        color: #FFFFFF !important;
+        border: 1.5px solid #FFFFFF !important;
+        border-radius: 0px !important;
+    }
+    .ph-block .stFileUploader section button:hover {
+        background-color: #F6C945 !important;
+        color: #000000 !important;
+        border-color: #F6C945 !important;
+    }
+    .ph-block .stFileUploader footer { display: none !important; }
+    .ph-block [data-testid="stFileUploaderFileName"] { color: #FFFFFF !important; }
+
+    /* ---------- BADGES DE STATUT (appariement) ---------- */
+    .ph-badge {
+        display: inline-block;
+        font-family: 'Anton', sans-serif;
+        font-size: 11px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        padding: 4px 10px;
+        margin-bottom: 6px;
+        border-radius: 0px;
+    }
+    .ph-badge-ok { background-color: #F6C945; color: #000000 !important; }
+    .ph-badge-order { background-color: transparent; color: #F6C945 !important; border: 1px solid #F6C945; }
+    .ph-badge-warn { background-color: #E4453A; color: #FFFFFF !important; }
+
+    .ph-pair-card {
+        border: 1px solid rgba(255,255,255,0.25);
+        padding: 12px;
+        margin-bottom: 16px;
+        background-color: #141414;
+    }
+    .ph-pair-name {
+        font-family: 'Anton', sans-serif !important;
+        color: #FFFFFF !important;
+        font-size: 15px !important;
+        letter-spacing: 0.5px;
+        margin: 6px 0 0 0;
+        text-transform: uppercase;
+    }
+
+    /* ---------- BOUTON D'ACTION PRINCIPAL ---------- */
     .stButton>button {
         background-color: #000000 !important;
-        color: #f6c945 !important;
+        color: #FFFFFF !important;
         font-family: 'Anton', sans-serif !important;
         border: 3px solid #000000 !important;
         border-radius: 0px !important;
         padding: 20px 30px !important;
-        font-size: 24px !important;
+        font-size: 22px !important;
+        letter-spacing: 1px;
         text-transform: uppercase;
         width: 100%;
-        transition: 0.2s;
+        transition: 0.15s;
     }
     .stButton>button:hover {
-        background-color: #ffffff !important;
+        background-color: #F6C945 !important;
         color: #000000 !important;
-        border-color: #ffffff !important;
+        border-color: #000000 !important;
     }
+    .stDownloadButton>button {
+        background-color: #F6C945 !important;
+        color: #000000 !important;
+        font-family: 'Anton', sans-serif !important;
+        border: 3px solid #F6C945 !important;
+        border-radius: 0px !important;
+        padding: 16px 24px !important;
+        font-size: 18px !important;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        width: 100%;
+    }
+    .stDownloadButton>button:hover {
+        background-color: #000000 !important;
+        color: #F6C945 !important;
+        border-color: #000000 !important;
+    }
+
+    /* ---------- PROGRESS BAR ---------- */
+    .stProgress > div > div > div > div { background-color: #F6C945 !important; }
+    .stProgress > div > div > div { background-color: #333333 !important; }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# 3. HEADER AVEC TON LOGO ET LE SOUSTRE DE LA MAQUETTE
-col_l1, col_l2, col_l3 = st.columns([1, 1.8, 1])
+
+def block_start(eyebrow: str, title: str, desc: str = "") -> None:
+    st.markdown('<div class="ph-block">', unsafe_allow_html=True)
+    st.markdown(f'<p class="ph-step-eyebrow">{eyebrow}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="ph-block-title">{title}</p>', unsafe_allow_html=True)
+    if desc:
+        st.markdown(f'<p class="ph-block-desc">{desc}</p>', unsafe_allow_html=True)
+
+
+def block_end() -> None:
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ============================================================
+# 3. HEADER
+# ============================================================
+
+col_l1, col_l2, col_l3 = st.columns([1, 1.6, 1])
 with col_l2:
+    logo_path = APP_DIR / "logo7.png"
+    if logo_path.exists():
+        st.image(str(logo_path), use_container_width=True)
+    else:
+        st.markdown(
+            "<h1 style='font-family:Anton;text-align:center;'>POSTER HEROES</h1>",
+            unsafe_allow_html=True,
+        )
+st.markdown(
+    '<p class="sub-title">Post-Production Factory · V2.0</p>',
+    unsafe_allow_html=True,
+)
+
+ensure_dirs()
+
+# ============================================================
+# 4. UTILITAIRES MÉTIER — TRI NATUREL & APPARIEMENT
+# ============================================================
+
+
+def natural_key(name: str):
+    """Tri chronologique naturel : img2 avant img10."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+
+
+def athlete_label(filename: str) -> str:
+    stem = Path(filename).stem
+    stem = re.sub(r"[_\-]+", " ", stem).strip()
+    return stem.title() if stem else filename
+
+
+@dataclass
+class Pair:
+    athlete: str
+    portrait_name: str
+    pieds_name: str
+    match_type: str  # "nom" | "ordre"
+
+
+@dataclass
+class MatchResult:
+    pairs: list = field(default_factory=list)
+    orphan_portraits: list = field(default_factory=list)
+    orphan_pieds: list = field(default_factory=list)
+
+
+def build_pairs(portrait_names: list[str], pieds_names: list[str]) -> MatchResult:
+    """
+    Apparie portraits <-> pieds :
+    1. Priorité au nom de fichier identique.
+    2. Le reste est apparié par ordre chronologique (tri naturel des noms).
+    Les fichiers en surplus (l'un des deux dossiers a plus de fichiers)
+    restent orphelins et sont signalés.
+    """
+    result = MatchResult()
+
+    remaining_portraits = sorted(portrait_names, key=natural_key)
+    remaining_pieds = sorted(pieds_names, key=natural_key)
+
+    # 1. Appariement exact par nom
+    exact = [n for n in remaining_portraits if n in remaining_pieds]
+    for name in exact:
+        result.pairs.append(Pair(athlete_label(name), name, name, "nom"))
+        remaining_portraits.remove(name)
+        remaining_pieds.remove(name)
+
+    # 2. Appariement par ordre pour le reste
+    n = min(len(remaining_portraits), len(remaining_pieds))
+    for i in range(n):
+        p_name, f_name = remaining_portraits[i], remaining_pieds[i]
+        result.pairs.append(Pair(athlete_label(p_name), p_name, f_name, "ordre"))
+
+    result.orphan_portraits = remaining_portraits[n:]
+    result.orphan_pieds = remaining_pieds[n:]
+
+    # Ordre final chronologique global
+    result.pairs.sort(key=lambda p: natural_key(p.portrait_name))
+    return result
+
+
+def save_uploads(files, folder: Path) -> None:
+    for f in files:
+        with open(folder / f.name, "wb") as out:
+            out.write(f.getbuffer())
+
+
+# ============================================================
+# 5. GÉNÉRATION (PLACEHOLDER — POINT DE BRANCHEMENT API)
+# ============================================================
+
+
+def generate_poster_placeholder(pair: Pair, template_path: Path) -> Image.Image:
+    """
+    ⚠️ PLACEHOLDER — pas d'appel IA ici.
+    Produit une planche de contrôle (contact sheet) montrant le template,
+    le portrait et la photo en pieds côte à côte, pour valider visuellement
+    l'appariement avant de brancher Nano Banana Pro sur cette fonction.
+    """
+    thumb_h = 480
+    portrait_img = Image.open(DIR_PORTRAITS / pair.portrait_name).convert("RGB")
+    pieds_img = Image.open(DIR_PIEDS / pair.pieds_name).convert("RGB")
+    template_img = Image.open(template_path).convert("RGB")
+
+    def resize_h(img, h):
+        w = int(img.width * (h / img.height))
+        return img.resize((w, h))
+
+    portrait_img = resize_h(portrait_img, thumb_h)
+    pieds_img = resize_h(pieds_img, thumb_h)
+    template_img = resize_h(template_img, thumb_h)
+
+    gap = 16
+    total_w = portrait_img.width + pieds_img.width + template_img.width + gap * 2
+    canvas = Image.new("RGB", (total_w, thumb_h + 60), "#0A0A0A")
+    x = 0
+    for img in (template_img, portrait_img, pieds_img):
+        canvas.paste(img, (x, 50))
+        x += img.width + gap
+
+    draw = ImageDraw.Draw(canvas)
     try:
-        st.image("logo7.png", use_container_width=True)
-    except:
-        st.markdown("<p class='main-title'>POSTER HEROES</p>", unsafe_allow_html=True)
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22
+        )
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((10, 12), f"STAGING · {pair.athlete}", fill="#F6C945", font=font)
 
-st.markdown("<p class='sub-title'>POST-PRODUCTION FACTORY V1.0</p>", unsafe_allow_html=True)
+    return canvas
 
-# --- INITIALISATION DES RÉPERTOIRES ---
-if not os.path.exists("temp_portraits"): os.makedirs("temp_portraits")
-if not os.path.exists("temp_pieds"): os.makedirs("temp_pieds")
-if not os.path.exists("temp_template"): os.makedirs("temp_template")
-if not os.path.exists("temp_sorties"): os.makedirs("temp_sorties")
 
-# --- CONSTRUTION DES BLOCS NOIRS DE LA MAQUETTE ---
+def build_manifest(match: MatchResult, template_name: str) -> dict:
+    return {
+        "template": template_name,
+        "print_spec": {
+            "width_cm": PRINT_WIDTH_CM,
+            "height_cm": PRINT_HEIGHT_CM,
+            "dpi": PRINT_DPI,
+            "width_px": PRINT_WIDTH_PX,
+            "height_px": PRINT_HEIGHT_PX,
+            "color_profile": COLOR_PROFILE,
+        },
+        "status": "PENDING_NANO_BANANA_GENERATION",
+        "jobs": [
+            {
+                "athlete": p.athlete,
+                "portrait_file": p.portrait_name,
+                "pieds_file": p.pieds_name,
+                "match_type": p.match_type,
+                "output_filename": f"{Path(p.portrait_name).stem}_POSTER.jpg",
+            }
+            for p in match.pairs
+        ],
+        "orphans": {
+            "portraits_sans_pieds": match.orphan_portraits,
+            "pieds_sans_portrait": match.orphan_pieds,
+        },
+    }
 
-# ⚡ BLOC ÉTAPE 1
-st.markdown('<div class="custom-black-block">', unsafe_allow_html=True)
-st.markdown('<p class="block-title">⚡ ÉTAPE 1 : LE TEMPLATE</p>', unsafe_allow_html=True)
-st.markdown('<p class="block-label">DÉPOSER LE FOND DE POSTER (.JPG, .PNG)</p>', unsafe_allow_html=True)
-template_file = st.file_uploader("", type=["jpg", "jpeg", "png"], key="template", label_visibility="collapsed")
-st.markdown('</div>', unsafe_allow_html=True)
 
-# ⚡ BLOC ÉTAPE 2
-st.markdown('<div class="custom-black-block">', unsafe_allow_html=True)
-st.markdown('<p class="block-title">⚡ ÉTAPE 2 : LES PHOTOS JOUEURS</p>', unsafe_allow_html=True)
+# ============================================================
+# 6. ÉTAPE 1 — TEMPLATE
+# ============================================================
 
+block_start(
+    "⚡ ÉTAPE 1",
+    "LE TEMPLATE",
+    "Déposez le poster de référence (.jpg). Nano Banana Pro s'appuiera "
+    "dessus pour ne remplacer que le personnage.",
+)
+template_file = st.file_uploader(
+    "template", type=["jpg", "jpeg"], key="template", label_visibility="collapsed"
+)
+if template_file:
+    st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+    tcol1, tcol2 = st.columns([1, 2])
+    with tcol1:
+        st.image(template_file, caption=template_file.name, use_container_width=True)
+    with tcol2:
+        tmpl_img = Image.open(template_file)
+        st.markdown(
+            f"""
+            <p class="ph-asset-title">Format de sortie visé</p>
+            <p class="ph-asset-desc" style="opacity:0.9;">
+            {PRINT_WIDTH_CM} × {PRINT_HEIGHT_CM} cm · {PRINT_DPI} dpi · {COLOR_PROFILE}<br>
+            Soit {PRINT_WIDTH_PX} × {PRINT_HEIGHT_PX} px en sortie finale.<br><br>
+            Template importé : {tmpl_img.width} × {tmpl_img.height} px
+            </p>
+            """,
+            unsafe_allow_html=True,
+        )
+block_end()
+
+# ============================================================
+# 7. ÉTAPE 2 — PHOTOS JOUEURS
+# ============================================================
+
+block_start(
+    "⚡ ÉTAPE 2",
+    "LES PHOTOS JOUEURS",
+    "Même nombre de photos dans chaque bloc, mêmes noms de fichiers si "
+    "possible, et dans l'ordre chronologique — pour un appariement fiable.",
+)
 c1, c2 = st.columns(2)
 with c1:
-    st.markdown('<p class="asset-title">👤 PORTRAITS</p>', unsafe_allow_html=True)
-    st.markdown('<p class="block-label">Glisser les visages ici</p>', unsafe_allow_html=True)
-    portraits_files = st.file_uploader("", accept_multiple_files=True, type=["jpg", "jpeg", "png"], key="portraits", label_visibility="collapsed")
+    st.markdown('<p class="ph-asset-title">👤 Portraits</p>', unsafe_allow_html=True)
+    st.markdown('<p class="ph-asset-desc">Glissez les visages ici</p>', unsafe_allow_html=True)
+    portraits_files = st.file_uploader(
+        "portraits",
+        accept_multiple_files=True,
+        type=["jpg", "jpeg", "png"],
+        key="portraits",
+        label_visibility="collapsed",
+    )
 with c2:
-    st.markdown('<p class="asset-title">🏃‍♂️ PHOTOS EN PIEDS</p>', unsafe_allow_html=True)
-    st.markdown('<p class="block-label">Glissez les actions ici</p>', unsafe_allow_html=True)
-    pieds_files = st.file_uploader("", accept_multiple_files=True, type=["jpg", "jpeg", "png"], key="pieds", label_visibility="collapsed")
-st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<p class="ph-asset-title">🏃 Photos en pieds</p>', unsafe_allow_html=True)
+    st.markdown('<p class="ph-asset-desc">Glissez les actions ici</p>', unsafe_allow_html=True)
+    pieds_files = st.file_uploader(
+        "pieds",
+        accept_multiple_files=True,
+        type=["jpg", "jpeg", "png"],
+        key="pieds",
+        label_visibility="collapsed",
+    )
+block_end()
 
-# --- TRAITEMENT ET AGENCEMENT ---
+# ============================================================
+# 8. ÉTAPE 3 — VÉRIFICATION DE L'APPARIEMENT
+# ============================================================
+
+match: MatchResult | None = None
+
 if template_file and portraits_files and pieds_files:
-    
-    # Stockage
-    template_path = os.path.join("temp_template", template_file.name)
-    with open(template_path, "wb") as f: f.write(template_file.read())
-    
-    portraits_dict = {f.name: f for f in portraits_files}
-    pieds_dict = {f.name: f for f in pieds_files}
-    paires = [n for n in portraits_dict.keys() if n in pieds_dict]
-    
-    # Gros bouton d'action sous les blocs
-    st.write("")
-    if st.button(f"LANCER LA GÉNÉRATION DES {len(paires)} POSTERS"):
-        bar = st.progress(0)
-        
-        for idx, filename in enumerate(paires):
-            with open(os.path.join("temp_sorties", filename), "wb") as out:
-                out.write(portraits_dict[filename].read())
-            time.sleep(0.3)
-            bar.progress((idx + 1) / len(paires))
-            
-        # BLOC ÉTAPE 3 (RÉCUPÉRATION)
-        st.markdown('<div class="custom-black-block">', unsafe_allow_html=True)
-        st.markdown('<p class="block-title">📥 ÉTAPE 3 : RÉCUPÉRATION</p>', unsafe_allow_html=True)
-        
+    save_uploads([template_file], DIR_TEMPLATE)
+    save_uploads(portraits_files, DIR_PORTRAITS)
+    save_uploads(pieds_files, DIR_PIEDS)
+
+    match = build_pairs(
+        [f.name for f in portraits_files], [f.name for f in pieds_files]
+    )
+
+    block_start(
+        "⚡ ÉTAPE 3",
+        "VÉRIFICATION DE L'APPARIEMENT",
+        f"{len(match.pairs)} paire(s) détectée(s) sur "
+        f"{len(portraits_files)} portrait(s) / {len(pieds_files)} photo(s) en pieds.",
+    )
+
+    n_by_name = sum(1 for p in match.pairs if p.match_type == "nom")
+    n_by_order = sum(1 for p in match.pairs if p.match_type == "ordre")
+    st.markdown(
+        f'<span class="ph-badge ph-badge-ok">{n_by_name} par nom identique</span> '
+        f'<span class="ph-badge ph-badge-order">{n_by_order} par ordre chrono.</span>',
+        unsafe_allow_html=True,
+    )
+
+    if match.orphan_portraits or match.orphan_pieds:
+        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+        if match.orphan_portraits:
+            st.warning(
+                "Portrait(s) sans photo en pieds correspondante : "
+                + ", ".join(match.orphan_portraits)
+            )
+        if match.orphan_pieds:
+            st.warning(
+                "Photo(s) en pieds sans portrait correspondant : "
+                + ", ".join(match.orphan_pieds)
+            )
+
+    if match.pairs:
+        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+        grid = st.columns(4)
+        for i, p in enumerate(match.pairs):
+            with grid[i % 4]:
+                st.markdown('<div class="ph-pair-card">', unsafe_allow_html=True)
+                ic1, ic2 = st.columns(2)
+                with ic1:
+                    st.image(str(DIR_PORTRAITS / p.portrait_name), use_container_width=True)
+                with ic2:
+                    st.image(str(DIR_PIEDS / p.pieds_name), use_container_width=True)
+                badge_cls = "ph-badge-ok" if p.match_type == "nom" else "ph-badge-order"
+                badge_txt = "NOM" if p.match_type == "nom" else "ORDRE"
+                st.markdown(
+                    f'<span class="ph-badge {badge_cls}">{badge_txt}</span>'
+                    f'<p class="ph-pair-name">{p.athlete}</p>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown("</div>", unsafe_allow_html=True)
+
+    block_end()
+
+# ============================================================
+# 9. LANCEMENT & ÉTAPE 4 — RÉCUPÉRATION
+# ============================================================
+
+if match and match.pairs:
+    launch = st.button(f"PRODUIRE LES {len(match.pairs)} POSTERS")
+
+    if launch:
+        for f in DIR_OUTPUT.glob("*"):
+            f.unlink()
+
+        bar = st.progress(0, text="Préparation des jobs de génération…")
+        template_path = DIR_TEMPLATE / template_file.name
+
+        for idx, pair in enumerate(match.pairs):
+            preview = generate_poster_placeholder(pair, template_path)
+            out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_STAGING.jpg"
+            preview.save(out_path, quality=92)
+            bar.progress(
+                (idx + 1) / len(match.pairs),
+                text=f"{pair.athlete} ({idx + 1}/{len(match.pairs)})",
+            )
+
+        manifest = build_manifest(match, template_file.name)
+        with open(DIR_OUTPUT / "manifest.json", "w", encoding="utf-8") as mf:
+            json.dump(manifest, mf, ensure_ascii=False, indent=2)
+
+        block_start(
+            "📥 ÉTAPE 4",
+            "RÉCUPÉRATION",
+            "Aperçus de staging (contrôle d'appariement) + manifeste de "
+            "génération prêt à brancher sur Nano Banana Pro.",
+        )
+
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w") as z:
-            for f in paires: z.write(os.path.join("temp_sorties", f), arcname=f)
-        
+            for f in DIR_OUTPUT.glob("*"):
+                z.write(f, arcname=f.name)
+
         st.download_button(
-            label="📦 TÉLENTRE LE PACK ZIP COMPLET",
+            "📦 TÉLÉCHARGER LE PACK ZIP COMPLET",
             data=zip_buf.getvalue(),
-            file_name="PROD_POSTER_HEROES.zip",
-            mime="application/zip"
+            file_name="POSTER_HEROES_STAGING.zip",
+            mime="application/zip",
         )
-        
-        st.markdown('<p class="asset-title" style="margin-top:20px;">🗂️ APERÇU UNITAIRE</p>', unsafe_allow_html=True)
+
+        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="ph-asset-title">🗂️ Aperçu unitaire</p>', unsafe_allow_html=True)
         grid = st.columns(4)
-        for i, f in enumerate(paires):
+        for i, pair in enumerate(match.pairs):
+            out_path = DIR_OUTPUT / f"{Path(pair.portrait_name).stem}_STAGING.jpg"
             with grid[i % 4]:
-                st.image(os.path.join("temp_sorties", f), use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+                st.image(str(out_path), caption=pair.athlete, use_container_width=True)
+
+        block_end()
