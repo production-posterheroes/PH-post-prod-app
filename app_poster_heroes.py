@@ -534,26 +534,22 @@ def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -
     raise RuntimeError(f"Le modèle n'a renvoyé aucune image ({detail}).")
 
 
-def apply_overlays(poster: Image.Image, overlays: list[dict]) -> Image.Image:
+def apply_overlays(poster: Image.Image, overlay_bytes_list: list[bytes]) -> Image.Image:
     """
-    Colle des PNG (logo, textes...) par-dessus le poster final, à une position
-    et une taille données en pourcentage de la surface du poster — donc
-    toujours cohérent quelle que soit la résolution de sortie. Ces éléments
-    ne passent JAMAIS par l'IA : ce sont les pixels d'origine, garantis
-    identiques d'un poster à l'autre.
-    x_pct / y_pct = position du CENTRE de l'élément, w_pct = largeur relative.
+    Colle des PNG (logo, textes...) par-dessus le poster final. Chaque PNG est
+    attendu à la taille EXACTE du poster (même canevas, transparent partout
+    sauf les éléments à figer) — donc redimensionné à la taille du poster puis
+    collé en pleine page, sans aucun réglage de position. Ces éléments ne
+    passent JAMAIS par l'IA : pixels d'origine, garantis identiques d'un
+    poster à l'autre.
     """
     poster = poster.convert("RGBA")
     W, H = poster.size
-    for ov in overlays:
-        overlay_img = Image.open(io.BytesIO(ov["bytes"])).convert("RGBA")
-        target_w = max(1, int(W * ov["w_pct"] / 100))
-        ratio = target_w / overlay_img.width
-        target_h = max(1, int(overlay_img.height * ratio))
-        overlay_resized = overlay_img.resize((target_w, target_h), Image.LANCZOS)
-        paste_x = int(W * ov["x_pct"] / 100) - target_w // 2
-        paste_y = int(H * ov["y_pct"] / 100) - target_h // 2
-        poster.paste(overlay_resized, (paste_x, paste_y), overlay_resized)
+    for data in overlay_bytes_list:
+        overlay_img = Image.open(io.BytesIO(data)).convert("RGBA")
+        if overlay_img.size != (W, H):
+            overlay_img = overlay_img.resize((W, H), Image.LANCZOS)
+        poster.paste(overlay_img, (0, 0), overlay_img)
     return poster.convert("RGB")
 
 
@@ -787,8 +783,9 @@ if match and match.pairs:
             unsafe_allow_html=True,
         )
         st.markdown(
-            '<p class="ph-asset-desc">PNG transparents. Collés APRÈS la génération IA — '
-            "jamais réinterprétés, garantis identiques sur tous les posters.</p>",
+            '<p class="ph-asset-desc">PNG transparents, à la taille EXACTE du poster '
+            "final (même canevas). Collés tels quels, pleine page, APRÈS la "
+            "génération IA — jamais réinterprétés.</p>",
             unsafe_allow_html=True,
         )
         overlay_files = st.file_uploader(
@@ -799,25 +796,11 @@ if match and match.pairs:
             label_visibility="collapsed",
         )
 
-        overlays_config = []
-        if overlay_files:
-            preview_base = Image.open(template_file).convert("RGBA") if template_file else None
-            for f in overlay_files:
-                with st.expander(f"Position — {f.name}", expanded=True):
-                    oc1, oc2, oc3 = st.columns(3)
-                    with oc1:
-                        x_pct = st.slider("Horizontal (centre, %)", 0, 100, 50, key=f"ov_x_{f.name}")
-                    with oc2:
-                        y_pct = st.slider("Vertical (centre, %)", 0, 100, 8, key=f"ov_y_{f.name}")
-                    with oc3:
-                        w_pct = st.slider("Largeur (%)", 1, 100, 20, key=f"ov_w_{f.name}")
-                overlays_config.append(
-                    {"bytes": f.getvalue(), "x_pct": x_pct, "y_pct": y_pct, "w_pct": w_pct}
-                )
-
-            if preview_base is not None:
-                preview_img = apply_overlays(preview_base, overlays_config)
-                st.image(preview_img, caption="Aperçu du placement (sur le template)", width=260)
+        overlays_bytes = [f.getvalue() for f in overlay_files] if overlay_files else []
+        if overlays_bytes and template_file:
+            preview_base = Image.open(template_file).convert("RGBA")
+            preview_img = apply_overlays(preview_base, overlays_bytes)
+            st.image(preview_img, caption="Aperçu du collage (sur le template)", width=260)
 
         st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
         st.markdown('<p class="ph-asset-title">📝 Prompt envoyé à l\'IA</p>', unsafe_allow_html=True)
@@ -856,13 +839,13 @@ if match and match.pairs:
                     result_img = generate_poster_real(
                         pair, template_path, client, prompt_text
                     )
-                    if overlays_config:
-                        result_img = apply_overlays(result_img, overlays_config)
+                    if overlays_bytes:
+                        result_img = apply_overlays(result_img, overlays_bytes)
                     result_img.save(out_path, "JPEG", quality=100, subsampling=0)
                 else:
                     result_img = generate_poster_placeholder(pair, template_path)
-                    if overlays_config:
-                        result_img = apply_overlays(result_img, overlays_config)
+                    if overlays_bytes:
+                        result_img = apply_overlays(result_img, overlays_bytes)
                     result_img.save(out_path, "JPEG", quality=92)
             except Exception as exc:
                 errors.append(f"{pair.athlete} : {exc}")
@@ -881,10 +864,7 @@ if match and match.pairs:
         manifest = build_manifest(match, template_file.name)
         manifest["status"] = "GENERATED" if real_mode else "STAGING_ONLY"
         manifest["prompt_used"] = prompt_text
-        manifest["overlays"] = [
-            {"x_pct": o["x_pct"], "y_pct": o["y_pct"], "w_pct": o["w_pct"]}
-            for o in overlays_config
-        ]
+        manifest["overlays_count"] = len(overlays_bytes)
         with open(DIR_OUTPUT / "manifest.json", "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
 
