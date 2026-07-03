@@ -446,16 +446,17 @@ DEFAULT_PROMPT = (
     "typographies, logos, couleurs, décor, effets — en remplaçant uniquement "
     "le personnage présent sur le poster par ce nouvel athlète, en fusionnant "
     "naturellement son visage (2) avec sa posture/action (3). Ne modifie rien "
-    "d'autre sur le poster.\n\n"
+    "d'autre sur le poster.\n"
     "IMPORTANT — étalonnage colorimétrique : les photos sources (2) et (3) "
     "peuvent être des clichés bruts, non retouchés, avec une balance des "
-    "blancs, un contraste et une saturation différents du poster. Corrige "
-    "impérativement la colorimétrie du personnage pour qu'il soit "
-    "PARFAITEMENT harmonisé avec l'ambiance chromatique, le contraste et la "
-    "température de couleur déjà présents sur le poster de référence — comme "
-    "s'il avait été photographié dans les mêmes conditions de lumière que le "
-    "reste du visuel. Aucune photo brute, plate ou désaturée ne doit "
-    "transparaître : le rendu final doit être uniforme sur l'ensemble du poster.\n\n"
+    "blancs, un contraste et une saturation différentes les unes des autres, "
+    "comparé au poster. Corrige impérativement la colorimétrie du portrait et "
+    "de l'action du personnage (1) et (2) pour qu'il soit PARFAITEMENT dans "
+    "le même style de colorimétrie, ambiance chromatique, contraste et "
+    "température de couleur du portrait et personnage en action du poster de "
+    "référence. Aucune photo brute, plate ou désaturée ne doit transparaître : "
+    "le rendu final doit donner la même ambiance colorimétrique que l'image "
+    "de référence.\n"
     "Éclairage et perspective cohérents avec le décor d'origine. Rendu final "
     "net, qualité studio, sans filigrane."
 )
@@ -531,6 +532,29 @@ def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -
 
     detail = " | ".join(diagnostics) if diagnostics else "aucune information de diagnostic disponible"
     raise RuntimeError(f"Le modèle n'a renvoyé aucune image ({detail}).")
+
+
+def apply_overlays(poster: Image.Image, overlays: list[dict]) -> Image.Image:
+    """
+    Colle des PNG (logo, textes...) par-dessus le poster final, à une position
+    et une taille données en pourcentage de la surface du poster — donc
+    toujours cohérent quelle que soit la résolution de sortie. Ces éléments
+    ne passent JAMAIS par l'IA : ce sont les pixels d'origine, garantis
+    identiques d'un poster à l'autre.
+    x_pct / y_pct = position du CENTRE de l'élément, w_pct = largeur relative.
+    """
+    poster = poster.convert("RGBA")
+    W, H = poster.size
+    for ov in overlays:
+        overlay_img = Image.open(io.BytesIO(ov["bytes"])).convert("RGBA")
+        target_w = max(1, int(W * ov["w_pct"] / 100))
+        ratio = target_w / overlay_img.width
+        target_h = max(1, int(overlay_img.height * ratio))
+        overlay_resized = overlay_img.resize((target_w, target_h), Image.LANCZOS)
+        paste_x = int(W * ov["x_pct"] / 100) - target_w // 2
+        paste_y = int(H * ov["y_pct"] / 100) - target_h // 2
+        poster.paste(overlay_resized, (paste_x, paste_y), overlay_resized)
+    return poster.convert("RGB")
 
 
 def generate_poster_placeholder(pair: Pair, template_path: Path) -> Image.Image:
@@ -757,6 +781,45 @@ if match and match.pairs:
         mode = st.radio("Mode de production", mode_options, label_visibility="collapsed")
         real_mode = mode.startswith("⚡")
 
+        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="ph-asset-title">🖼️ Éléments fixes à recoller (logo, textes)</p>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<p class="ph-asset-desc">PNG transparents. Collés APRÈS la génération IA — '
+            "jamais réinterprétés, garantis identiques sur tous les posters.</p>",
+            unsafe_allow_html=True,
+        )
+        overlay_files = st.file_uploader(
+            "overlays",
+            type=["png"],
+            accept_multiple_files=True,
+            key="overlays",
+            label_visibility="collapsed",
+        )
+
+        overlays_config = []
+        if overlay_files:
+            preview_base = Image.open(template_file).convert("RGBA") if template_file else None
+            for f in overlay_files:
+                with st.expander(f"Position — {f.name}", expanded=True):
+                    oc1, oc2, oc3 = st.columns(3)
+                    with oc1:
+                        x_pct = st.slider("Horizontal (centre, %)", 0, 100, 50, key=f"ov_x_{f.name}")
+                    with oc2:
+                        y_pct = st.slider("Vertical (centre, %)", 0, 100, 8, key=f"ov_y_{f.name}")
+                    with oc3:
+                        w_pct = st.slider("Largeur (%)", 1, 100, 20, key=f"ov_w_{f.name}")
+                overlays_config.append(
+                    {"bytes": f.getvalue(), "x_pct": x_pct, "y_pct": y_pct, "w_pct": w_pct}
+                )
+
+            if preview_base is not None:
+                preview_img = apply_overlays(preview_base, overlays_config)
+                st.image(preview_img, caption="Aperçu du placement (sur le template)", width=260)
+
+        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
         st.markdown('<p class="ph-asset-title">📝 Prompt envoyé à l\'IA</p>', unsafe_allow_html=True)
         prompt_text = st.text_area(
             "prompt",
@@ -793,9 +856,13 @@ if match and match.pairs:
                     result_img = generate_poster_real(
                         pair, template_path, client, prompt_text
                     )
+                    if overlays_config:
+                        result_img = apply_overlays(result_img, overlays_config)
                     result_img.save(out_path, "JPEG", quality=100, subsampling=0)
                 else:
                     result_img = generate_poster_placeholder(pair, template_path)
+                    if overlays_config:
+                        result_img = apply_overlays(result_img, overlays_config)
                     result_img.save(out_path, "JPEG", quality=92)
             except Exception as exc:
                 errors.append(f"{pair.athlete} : {exc}")
@@ -814,6 +881,10 @@ if match and match.pairs:
         manifest = build_manifest(match, template_file.name)
         manifest["status"] = "GENERATED" if real_mode else "STAGING_ONLY"
         manifest["prompt_used"] = prompt_text
+        manifest["overlays"] = [
+            {"x_pct": o["x_pct"], "y_pct": o["y_pct"], "w_pct": o["w_pct"]}
+            for o in overlays_config
+        ]
         with open(DIR_OUTPUT / "manifest.json", "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
 
