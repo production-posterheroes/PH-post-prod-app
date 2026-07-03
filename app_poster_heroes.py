@@ -446,8 +446,18 @@ DEFAULT_PROMPT = (
     "typographies, logos, couleurs, décor, effets — en remplaçant uniquement "
     "le personnage présent sur le poster par ce nouvel athlète, en fusionnant "
     "naturellement son visage (2) avec sa posture/action (3). Ne modifie rien "
-    "d'autre sur le poster. Éclairage et perspective cohérents avec le décor "
-    "d'origine. Rendu final net, qualité studio, sans filigrane."
+    "d'autre sur le poster.\n\n"
+    "IMPORTANT — étalonnage colorimétrique : les photos sources (2) et (3) "
+    "peuvent être des clichés bruts, non retouchés, avec une balance des "
+    "blancs, un contraste et une saturation différents du poster. Corrige "
+    "impérativement la colorimétrie du personnage pour qu'il soit "
+    "PARFAITEMENT harmonisé avec l'ambiance chromatique, le contraste et la "
+    "température de couleur déjà présents sur le poster de référence — comme "
+    "s'il avait été photographié dans les mêmes conditions de lumière que le "
+    "reste du visuel. Aucune photo brute, plate ou désaturée ne doit "
+    "transparaître : le rendu final doit être uniforme sur l'ensemble du poster.\n\n"
+    "Éclairage et perspective cohérents avec le décor d'origine. Rendu final "
+    "net, qualité studio, sans filigrane."
 )
 
 
@@ -728,28 +738,44 @@ if template_file and portraits_files and pieds_files:
 if match and match.pairs:
     client = get_genai_client()
 
-    st.markdown('<hr class="ph-divider" style="border-top-color: rgba(0,0,0,0.2);">', unsafe_allow_html=True)
+    with ph_block(
+        "ph-step-4",
+        "⚡ ÉTAPE 4",
+        "RÉGLAGES & LANCEMENT",
+        "Ajustez le prompt envoyé à Nano Banana Pro si besoin (colorimétrie, "
+        "cadrage, style...), choisissez le mode, puis lancez.",
+    ):
+        mode_options = ["🧪 Mode test (staging, gratuit)"]
+        if client is not None:
+            mode_options.append("⚡ Génération réelle (Nano Banana Pro, payant)")
+        else:
+            st.info(
+                "Clé API absente ou SDK non installé — seul le mode test est "
+                "disponible. Vérifiez `.streamlit/secrets.toml` et `pip install google-genai`."
+            )
 
-    mode_options = ["🧪 Mode test (staging, gratuit)"]
-    if client is not None:
-        mode_options.append("⚡ Génération réelle (Nano Banana Pro, payant)")
-    else:
-        st.info(
-            "Clé API absente ou SDK non installé — seul le mode test est "
-            "disponible. Vérifiez `.streamlit/secrets.toml` et `pip install google-genai`."
+        mode = st.radio("Mode de production", mode_options, label_visibility="collapsed")
+        real_mode = mode.startswith("⚡")
+
+        st.markdown('<p class="ph-asset-title">📝 Prompt envoyé à l\'IA</p>', unsafe_allow_html=True)
+        prompt_text = st.text_area(
+            "prompt",
+            value=DEFAULT_PROMPT,
+            height=220,
+            label_visibility="collapsed",
         )
+        if st.button("↺ Réinitialiser le prompt par défaut"):
+            prompt_text = DEFAULT_PROMPT
+            st.rerun()
 
-    mode = st.radio("Mode de production", mode_options, label_visibility="collapsed")
-    real_mode = mode.startswith("⚡")
+        if real_mode:
+            estimate = len(match.pairs) * PRICE_PER_IMAGE_4K_USD
+            st.warning(
+                f"Coût estimé pour {len(match.pairs)} poster(s) en 4K : "
+                f"environ {estimate:.2f} $ (tarif indicatif Nano Banana Pro, à vérifier)."
+            )
 
-    if real_mode:
-        estimate = len(match.pairs) * PRICE_PER_IMAGE_4K_USD
-        st.warning(
-            f"Coût estimé pour {len(match.pairs)} poster(s) en 4K : "
-            f"environ {estimate:.2f} $ (tarif indicatif Nano Banana Pro, à vérifier)."
-        )
-
-    launch = st.button(f"PRODUIRE LES {len(match.pairs)} POSTERS")
+        launch = st.button(f"PRODUIRE LES {len(match.pairs)} POSTERS")
 
     if launch:
         for f in DIR_OUTPUT.glob("*"):
@@ -765,7 +791,7 @@ if match and match.pairs:
             try:
                 if real_mode:
                     result_img = generate_poster_real(
-                        pair, template_path, client, DEFAULT_PROMPT
+                        pair, template_path, client, prompt_text
                     )
                     result_img.save(out_path, "JPEG", quality=100, subsampling=0)
                 else:
@@ -787,12 +813,13 @@ if match and match.pairs:
 
         manifest = build_manifest(match, template_file.name)
         manifest["status"] = "GENERATED" if real_mode else "STAGING_ONLY"
+        manifest["prompt_used"] = prompt_text
         with open(DIR_OUTPUT / "manifest.json", "w", encoding="utf-8") as mf:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
 
         with ph_block(
-            "ph-step-4",
-            "📥 ÉTAPE 4",
+            "ph-step-5",
+            "📥 ÉTAPE 5",
             "RÉCUPÉRATION",
             (
                 "Posters générés par Nano Banana Pro, prêts à l'impression."
