@@ -465,23 +465,31 @@ def _get_face_cascade():
             cascade_path = str(bundled_path)
         else:
             # Repli : certaines installations d'opencv-python-headless
-            # n'exposent pas cv2.data selon la version — d'où l'AttributeError
-            # possible ici si le fichier n'est pas embarqué avec l'app.
+            # n'exposent pas cv2.data selon la version.
             try:
                 cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            except AttributeError:
+            except Exception:
                 return None
-        loaded = cv2.CascadeClassifier(cascade_path)
-        _FACE_CASCADE = loaded if not loaded.empty() else None
+        try:
+            loaded = cv2.CascadeClassifier(cascade_path)
+            _FACE_CASCADE = loaded if not loaded.empty() else None
+        except Exception:
+            # Installation OpenCV incomplète/corrompue sur l'environnement de
+            # déploiement — on se replie sur "pas de détection" plutôt que
+            # de faire planter toute l'étape d'édition.
+            _FACE_CASCADE = None
     return _FACE_CASCADE
 
 
 def _get_hog_detector():
     global _HOG_PERSON_DETECTOR
     if _HOG_PERSON_DETECTOR is None and CV2_AVAILABLE:
-        hog = cv2.HOGDescriptor()
-        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-        _HOG_PERSON_DETECTOR = hog
+        try:
+            hog = cv2.HOGDescriptor()
+            hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+            _HOG_PERSON_DETECTOR = hog
+        except Exception:
+            _HOG_PERSON_DETECTOR = None
     return _HOG_PERSON_DETECTOR
 
 
@@ -531,29 +539,34 @@ def detect_subject(bgr, kind: str):
     Retourne (cx, cy, largeur_sujet, hauteur_sujet) du sujet détecté, ou None.
     Portrait -> visage (Haar cascade) étendu en "tête + épaules".
     Pieds -> silhouette entière (HOG).
+    Toute erreur (installation OpenCV cassée, etc.) retombe sur None plutôt
+    que de faire planter l'édition — le repli "cadre entier" prend le relais.
     """
-    if kind == "portrait":
-        cascade = _get_face_cascade()
-        if cascade is None:
-            return None
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
-        if len(faces) == 0:
-            return None
-        x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        subj_h = fh * 3.2  # tête + cheveux + épaules
-        subj_w = fw * 1.8
-        return (x + fw / 2, y + fh * 0.45, subj_w, subj_h)
-    else:
-        hog = _get_hog_detector()
-        if hog is None:
-            return None
-        rects, weights = hog.detectMultiScale(bgr, winStride=(8, 8), padding=(8, 8), scale=1.05)
-        if len(rects) == 0:
-            return None
-        idx = int(np.argmax(weights)) if len(weights) else 0
-        x, y, pw, ph = rects[idx]
-        return (x + pw / 2, y + ph / 2, pw, ph)
+    try:
+        if kind == "portrait":
+            cascade = _get_face_cascade()
+            if cascade is None:
+                return None
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+            if len(faces) == 0:
+                return None
+            x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+            subj_h = fh * 3.2  # tête + cheveux + épaules
+            subj_w = fw * 1.8
+            return (x + fw / 2, y + fh * 0.45, subj_w, subj_h)
+        else:
+            hog = _get_hog_detector()
+            if hog is None:
+                return None
+            rects, weights = hog.detectMultiScale(bgr, winStride=(8, 8), padding=(8, 8), scale=1.05)
+            if len(rects) == 0:
+                return None
+            idx = int(np.argmax(weights)) if len(weights) else 0
+            x, y, pw, ph = rects[idx]
+            return (x + pw / 2, y + ph / 2, pw, ph)
+    except Exception:
+        return None
 
 
 def frame_subject_with_padding(
@@ -586,22 +599,27 @@ def derive_reference_framing(kind: str, reference_bytes: bytes):
     Analyse une photo de référence et en déduit le cadrage à reproduire sur
     tout le lot : ratio du cadre (dimensions de la référence elle-même),
     échelle du sujet (% de la hauteur), position verticale (% depuis le haut).
-    Sans détection : le cadre de référence entier fait foi (échelle 100%,
-    centré verticalement) — repli sûr, jamais de crash.
+    Sans détection, ou en cas de panne OpenCV : repli sûr sur le cadre entier
+    de la référence (échelle 100%, centré verticalement) — jamais de crash.
     """
     ref_img = Image.open(io.BytesIO(reference_bytes))
-    ref_bgr = _pil_to_cv(ref_img)
-    h, w = ref_bgr.shape[:2]
+    w, h = ref_img.size  # via PIL, ne dépend pas d'OpenCV
     canvas_ratio = w / h if h else 1.0
 
-    subject = detect_subject(ref_bgr, kind)
-    if subject is None:
+    if not CV2_AVAILABLE:
         return canvas_ratio, 100.0, 50.0
 
-    _cx, cy, _subj_w, subj_h = subject
-    target_scale_pct = max(1.0, min(100.0, subj_h / h * 100.0))
-    target_vpos_pct = max(0.0, min(100.0, cy / h * 100.0))
-    return canvas_ratio, target_scale_pct, target_vpos_pct
+    try:
+        ref_bgr = _pil_to_cv(ref_img)
+        subject = detect_subject(ref_bgr, kind)
+        if subject is None:
+            return canvas_ratio, 100.0, 50.0
+        _cx, cy, _subj_w, subj_h = subject
+        target_scale_pct = max(1.0, min(100.0, subj_h / h * 100.0))
+        target_vpos_pct = max(0.0, min(100.0, cy / h * 100.0))
+        return canvas_ratio, target_scale_pct, target_vpos_pct
+    except Exception:
+        return canvas_ratio, 100.0, 50.0
 
 
 def auto_white_balance(bgr):
@@ -652,29 +670,42 @@ def preprocess_image(
     target_scale_pct: float,
     target_vpos_pct: float,
 ) -> bytes:
-    """Pipeline complet : correction colorimétrique puis placement, sans IA."""
+    """
+    Pipeline complet : correction colorimétrique puis placement, sans IA.
+    Filet de sécurité global : si OpenCV plante pour une raison quelconque
+    (installation cassée sur l'environnement de déploiement, image
+    corrompue...), on renvoie l'image d'origine inchangée plutôt que de
+    faire planter toute l'étape d'édition pour le reste du lot.
+    """
     img = Image.open(io.BytesIO(image_bytes))
     if not CV2_AVAILABLE:
         buf = io.BytesIO()
         img.convert("RGB").save(buf, "JPEG", quality=100, subsampling=0)
         return buf.getvalue()
 
-    bgr = _pil_to_cv(img)
+    try:
+        bgr = _pil_to_cv(img)
 
-    if do_correct:
-        if correct_mode == "reference" and reference_bytes:
-            ref_bgr = _pil_to_cv(Image.open(io.BytesIO(reference_bytes)))
-            bgr = match_color_to_reference(bgr, ref_bgr)
-        else:
-            bgr = auto_white_balance(bgr)
-            bgr = auto_exposure_contrast(bgr)
+        if do_correct:
+            if correct_mode == "reference" and reference_bytes:
+                ref_bgr = _pil_to_cv(Image.open(io.BytesIO(reference_bytes)))
+                bgr = match_color_to_reference(bgr, ref_bgr)
+            else:
+                bgr = auto_white_balance(bgr)
+                bgr = auto_exposure_contrast(bgr)
 
-    if do_frame:
-        bgr = frame_subject_with_padding(bgr, kind, canvas_ratio, target_scale_pct, target_vpos_pct)
+        if do_frame:
+            bgr = frame_subject_with_padding(bgr, kind, canvas_ratio, target_scale_pct, target_vpos_pct)
 
-    out_buf = io.BytesIO()
-    _cv_to_pil(bgr).save(out_buf, "JPEG", quality=100, subsampling=0)
-    return out_buf.getvalue()
+        out_buf = io.BytesIO()
+        _cv_to_pil(bgr).save(out_buf, "JPEG", quality=100, subsampling=0)
+        return out_buf.getvalue()
+    except Exception:
+        # Panne OpenCV imprévue : on ressort l'image d'origine inchangée,
+        # au même niveau de qualité, plutôt que de bloquer tout le lot.
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, "JPEG", quality=100, subsampling=0)
+        return buf.getvalue()
 
 
 # ============================================================
