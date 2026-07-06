@@ -16,6 +16,7 @@ import io
 import json
 import re
 import shutil
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -473,6 +474,94 @@ def _cv_to_pil(arr) -> Image.Image:
     return Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
 
 
+def _crop_box_centered(bgr, cx: float, cy: float, box_w: float, box_h: float):
+    """Découpe classique clampée aux limites de l'image (utilisée en fallback)."""
+    h, w = bgr.shape[:2]
+    left = int(max(0, min(cx - box_w / 2, w - box_w)))
+    top = int(max(0, min(cy - box_h / 2, h - box_h)))
+    box_w, box_h = int(min(box_w, w)), int(min(box_h, h))
+    return bgr[top: top + box_h, left: left + box_w]
+
+
+def _frame_on_white_canvas(bgr, box_left: float, box_top: float, box_w: float, box_h: float):
+    """
+    Place la portion [box_left..box_left+box_w] x [box_top..box_top+box_h] de
+    l'image source sur un canevas BLANC de taille (box_w, box_h). Si le cadre
+    calculé déborde des limites réelles de la photo, la zone manquante reste
+    blanche — aucune reconstruction, aucun pixel inventé.
+    """
+    h, w = bgr.shape[:2]
+    box_w, box_h = max(1, int(round(box_w))), max(1, int(round(box_h)))
+    canvas = np.full((box_h, box_w, 3), 255, dtype=np.uint8)
+
+    x0, y0 = max(0.0, box_left), max(0.0, box_top)
+    x1, y1 = min(float(w), box_left + box_w), min(float(h), box_top + box_h)
+    if x1 <= x0 or y1 <= y0:
+        return canvas  # aucun recouvrement : canevas 100% blanc
+
+    src_crop = bgr[int(y0):int(y1), int(x0):int(x1)]
+    dest_x, dest_y = int(round(x0 - box_left)), int(round(y0 - box_top))
+    dest_x = max(0, min(dest_x, box_w - src_crop.shape[1]))
+    dest_y = max(0, min(dest_y, box_h - src_crop.shape[0]))
+    canvas[dest_y:dest_y + src_crop.shape[0], dest_x:dest_x + src_crop.shape[1]] = src_crop
+    return canvas
+
+
+def detect_subject(bgr, kind: str):
+    """
+    Retourne (cx, cy, largeur_sujet, hauteur_sujet) du sujet détecté, ou None.
+    Portrait -> visage (Haar cascade) étendu en "tête + épaules".
+    Pieds -> silhouette entière (HOG).
+    """
+    if kind == "portrait":
+        cascade = _get_face_cascade()
+        if cascade is None:
+            return None
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        if len(faces) == 0:
+            return None
+        x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+        subj_h = fh * 3.2  # tête + cheveux + épaules
+        subj_w = fw * 1.8
+        return (x + fw / 2, y + fh * 0.45, subj_w, subj_h)
+    else:
+        hog = _get_hog_detector()
+        if hog is None:
+            return None
+        rects, weights = hog.detectMultiScale(bgr, winStride=(8, 8), padding=(8, 8), scale=1.05)
+        if len(rects) == 0:
+            return None
+        idx = int(np.argmax(weights)) if len(weights) else 0
+        x, y, pw, ph = rects[idx]
+        return (x + pw / 2, y + ph / 2, pw, ph)
+
+
+def frame_subject_with_padding(
+    bgr, kind: str, canvas_ratio: float, target_scale_pct: float, target_vpos_pct: float
+):
+    """
+    Place le sujet détecté à une échelle et une position verticale données,
+    toujours centré horizontalement, sur un canevas au ratio demandé. Les
+    zones du canevas non couvertes par la photo source restent blanches.
+    - target_scale_pct : le sujet occupe X% de la hauteur du canevas final.
+    - target_vpos_pct : le centre du sujet est positionné à Y% depuis le haut.
+    Sans détection : image entière centrée sur un canevas blanc (fallback sûr).
+    """
+    h, w = bgr.shape[:2]
+    subject = detect_subject(bgr, kind)
+    if subject is None:
+        cx, cy, subj_h = w / 2, h / 2, h
+    else:
+        cx, cy, _subj_w, subj_h = subject
+
+    canvas_h = subj_h / max(target_scale_pct, 1.0) * 100.0
+    canvas_w = canvas_h * canvas_ratio
+    box_top = cy - canvas_h * (target_vpos_pct / 100.0)
+    box_left = cx - canvas_w / 2
+    return _frame_on_white_canvas(bgr, box_left, box_top, canvas_w, canvas_h)
+
+
 def auto_white_balance(bgr):
     """Gray-world : ramène les 3 canaux à une moyenne commune (retire les dominantes)."""
     b, g, r = cv2.split(bgr.astype(np.float32))
@@ -492,54 +581,36 @@ def auto_exposure_contrast(bgr):
     return cv2.cvtColor(cv2.merge([l2, a, b]), cv2.COLOR_LAB2BGR)
 
 
-def _crop_box_centered(bgr, cx: float, cy: float, box_w: float, box_h: float):
-    h, w = bgr.shape[:2]
-    left = int(max(0, min(cx - box_w / 2, w - box_w)))
-    top = int(max(0, min(cy - box_h / 2, h - box_h)))
-    box_w, box_h = int(min(box_w, w)), int(min(box_h, h))
-    return bgr[top: top + box_h, left: left + box_w]
-
-
-def auto_crop_portrait(bgr, target_ratio: float = 3 / 4):
-    """Centre le cadrage sur le visage détecté (Haar cascade). Sans détection : image inchangée."""
-    cascade = _get_face_cascade()
-    if cascade is None:
-        return bgr
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
-    if len(faces) == 0:
-        return bgr
-    x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-    cx, cy = x + fw / 2, y + fh * 0.45  # un peu au-dessus du centre du visage (marge front/cheveux)
-    crop_h = fh * 3.2  # marge haut (cheveux) + bas (épaules)
-    crop_w = crop_h * target_ratio
-    return _crop_box_centered(bgr, cx, cy, crop_w, crop_h)
-
-
-def auto_crop_pieds(bgr, target_ratio: float = 2 / 3):
-    """Centre le cadrage sur la silhouette détectée (HOG). Sans détection : image inchangée."""
-    hog = _get_hog_detector()
-    if hog is None:
-        return bgr
-    rects, weights = hog.detectMultiScale(bgr, winStride=(8, 8), padding=(8, 8), scale=1.05)
-    if len(rects) == 0:
-        return bgr
-    idx = int(np.argmax(weights)) if len(weights) else 0
-    x, y, pw, ph = rects[idx]
-    cx, cy = x + pw / 2, y + ph / 2
-    crop_h = ph * 1.25  # marge tête + pieds
-    crop_w = crop_h * target_ratio
-    return _crop_box_centered(bgr, cx, cy, crop_w, crop_h)
+def match_color_to_reference(bgr, ref_bgr):
+    """
+    Transfert de couleur de Reinhard (espace LAB) : recale la moyenne et
+    l'écart-type de chaque canal de l'image source sur ceux de l'image de
+    référence. Aligne la signature colorimétrique sans dépendre du contenu
+    (contrairement au histogram matching classique).
+    """
+    src_lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    for i in range(3):
+        s_mean, s_std = src_lab[:, :, i].mean(), src_lab[:, :, i].std()
+        r_mean, r_std = ref_lab[:, :, i].mean(), ref_lab[:, :, i].std()
+        s_std = s_std if s_std > 1e-6 else 1.0
+        src_lab[:, :, i] = (src_lab[:, :, i] - s_mean) * (r_std / s_std) + r_mean
+    src_lab = np.clip(src_lab, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(src_lab, cv2.COLOR_LAB2BGR)
 
 
 def preprocess_image(
     image_bytes: bytes,
     kind: str,  # "portrait" | "pieds"
     do_correct: bool,
-    do_crop: bool,
-    target_ratio: float,
+    correct_mode: str,  # "auto" | "reference"
+    reference_bytes: bytes | None,
+    do_frame: bool,
+    canvas_ratio: float,
+    target_scale_pct: float,
+    target_vpos_pct: float,
 ) -> bytes:
-    """Pipeline complet : correction colorimétrique puis recadrage, sans IA."""
+    """Pipeline complet : correction colorimétrique puis placement, sans IA."""
     img = Image.open(io.BytesIO(image_bytes))
     if not CV2_AVAILABLE:
         buf = io.BytesIO()
@@ -547,11 +618,17 @@ def preprocess_image(
         return buf.getvalue()
 
     bgr = _pil_to_cv(img)
+
     if do_correct:
-        bgr = auto_white_balance(bgr)
-        bgr = auto_exposure_contrast(bgr)
-    if do_crop:
-        bgr = auto_crop_portrait(bgr, target_ratio) if kind == "portrait" else auto_crop_pieds(bgr, target_ratio)
+        if correct_mode == "reference" and reference_bytes:
+            ref_bgr = _pil_to_cv(Image.open(io.BytesIO(reference_bytes)))
+            bgr = match_color_to_reference(bgr, ref_bgr)
+        else:
+            bgr = auto_white_balance(bgr)
+            bgr = auto_exposure_contrast(bgr)
+
+    if do_frame:
+        bgr = frame_subject_with_padding(bgr, kind, canvas_ratio, target_scale_pct, target_vpos_pct)
 
     out_buf = io.BytesIO()
     _cv_to_pil(bgr).save(out_buf, format="JPEG", quality=95)
@@ -561,6 +638,7 @@ def preprocess_image(
 # ============================================================
 # 5. GÉNÉRATION (PLACEHOLDER — POINT DE BRANCHEMENT API)
 # ============================================================
+
 
 
 # ============================================================
@@ -621,12 +699,15 @@ def _image_part(path: Path):
     return genai_types.Part.from_bytes(data=data, mime_type=mime)
 
 
-def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -> Image.Image:
+def generate_poster_real(
+    pair: Pair, template_path: Path, client, prompt: str, max_retries: int = 3
+) -> Image.Image:
     """
     Appel réel à Nano Banana Pro. Envoie template + portrait + pieds en une
     seule requête multi-images, récupère l'image générée dans la réponse.
-    Lève une exception explicite en cas d'échec (quota, facturation, réseau,
-    réponse sans image) — à charge de l'appelant de l'afficher proprement.
+    Réessaie automatiquement (backoff exponentiel) sur les erreurs
+    transitoires (503 surcharge serveur, 429 quota temporaire). Lève une
+    exception explicite pour tout le reste (blocage sécurité, réseau...).
     """
     config = genai_types.GenerateContentConfig(
         response_modalities=["TEXT", "IMAGE"],
@@ -636,16 +717,28 @@ def generate_poster_real(pair: Pair, template_path: Path, client, prompt: str) -
         ),
     )
 
-    response = client.models.generate_content(
-        model=NANO_BANANA_MODEL,
-        contents=[
-            prompt,
-            _image_part(template_path),
-            _image_part(DIR_PORTRAITS / pair.portrait_name),
-            _image_part(DIR_PIEDS / pair.pieds_name),
-        ],
-        config=config,
-    )
+    contents = [
+        prompt,
+        _image_part(template_path),
+        _image_part(DIR_PORTRAITS / pair.portrait_name),
+        _image_part(DIR_PIEDS / pair.pieds_name),
+    ]
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=NANO_BANANA_MODEL, contents=contents, config=config
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            transient = any(code in str(exc) for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
+            if not transient or attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** (attempt + 1))  # 2s, 4s, 8s...
+    else:
+        raise last_error
 
     candidates = getattr(response, "candidates", None) or []
     for candidate in candidates:
@@ -765,6 +858,38 @@ def build_manifest(match: MatchResult, template_name: str) -> dict:
 
 
 # ============================================================
+# 5bis. ÉTAPE 0 — CHOIX DU PARCOURS
+# ============================================================
+
+with ph_block(
+    "ph-step-0",
+    "🧭 PARCOURS",
+    "QUE SOUHAITEZ-VOUS FAIRE ?",
+    "Choisissez ce que l'app doit produire avant de continuer.",
+):
+    parcours_choice = st.radio(
+        "parcours",
+        [
+            "🎨 Édition des images (correction + cadrage, sans IA)",
+            "⚡ Création des posters (Nano Banana Pro, images déjà éditées)",
+            "🎨⚡ Édition des images + Création des posters",
+        ],
+        index=2,
+        key="parcours_choice",
+        label_visibility="collapsed",
+    )
+
+if parcours_choice.startswith("🎨 Édition"):
+    APP_MODE = "edition"
+elif parcours_choice.startswith("⚡ Création"):
+    APP_MODE = "posters"
+else:
+    APP_MODE = "both"
+
+SHOW_EDITION = APP_MODE in ("edition", "both")
+SHOW_POSTERS = APP_MODE in ("posters", "both")
+
+# ============================================================
 # 6. ÉTAPE 1 — TEMPLATE
 # ============================================================
 
@@ -772,8 +897,13 @@ with ph_block(
     "ph-step-1",
     "⚡ ÉTAPE 1",
     "LE TEMPLATE",
-    "Déposez le poster de référence (.jpg). Nano Banana Pro s'appuiera "
-    "dessus pour ne remplacer que le personnage.",
+    (
+        "Déposez le poster de référence (.jpg). Nano Banana Pro s'appuiera "
+        "dessus pour ne remplacer que le personnage."
+        if SHOW_POSTERS
+        else "Déposez le poster de référence (.jpg) — utilisé comme référence "
+        "colorimétrique pour l'édition des photos."
+    ),
 ):
     template_file = st.file_uploader(
         "template", type=["jpg", "jpeg"], key="template", label_visibility="collapsed"
@@ -831,7 +961,7 @@ with ph_block(
         )
 
 # ============================================================
-# 8. ÉTAPE 3 — PRÉ-TRAITEMENT AUTOMATIQUE (SANS IA)
+# 8. ÉTAPE 3 — ÉDITION DES IMAGES (SANS IA)
 # ============================================================
 
 match: MatchResult | None = None
@@ -841,86 +971,131 @@ if template_file and portraits_files and pieds_files:
     save_uploads(portraits_files, DIR_PORTRAITS)
     save_uploads(pieds_files, DIR_PIEDS)
 
-    if CV2_AVAILABLE:
-        with ph_block(
-            "ph-step-3",
-            "⚡ ÉTAPE 3",
-            "PRÉ-TRAITEMENT AUTOMATIQUE (SANS IA)",
-            "Équilibrage exposition/balance des blancs et recadrage automatique "
-            "(détection visage / silhouette) — algorithmes classiques, aucun "
-            "appel API, gratuit et instantané. Remplace le passage par Lightroom.",
-        ):
-            pc1, pc2 = st.columns(2)
-            with pc1:
+    if SHOW_EDITION:
+        if CV2_AVAILABLE:
+            with ph_block(
+                "ph-step-3",
+                "⚡ ÉTAPE 3",
+                "ÉDITION DES IMAGES (SANS IA)",
+                "Correction colorimétrique calée sur le template + placement du "
+                "sujet à l'échelle/position voulue, avec marges blanches si la "
+                "photo source ne couvre pas tout le cadre. Aucun appel API.",
+            ):
+                st.markdown('<p class="ph-asset-title">🎨 Correction colorimétrique</p>', unsafe_allow_html=True)
                 do_correct = st.checkbox(
-                    "Corriger exposition + balance des blancs", value=True, key="do_correct"
+                    "Activer la correction colorimétrique", value=True, key="do_correct"
                 )
-            with pc2:
-                do_crop = st.checkbox(
-                    "Recadrer automatiquement (visage / silhouette)", value=False, key="do_crop"
-                )
-
-            rc1, rc2 = st.columns(2)
-            with rc1:
-                portrait_ratio_label = st.selectbox(
-                    "Ratio cible — portraits", ["3:4", "1:1", "4:5", "2:3"], index=0, key="portrait_ratio"
-                )
-            with rc2:
-                pieds_ratio_label = st.selectbox(
-                    "Ratio cible — pieds", ["2:3", "3:4", "1:1"], index=0, key="pieds_ratio"
-                )
-
-            def _ratio_val(label: str) -> float:
-                a, b = label.split(":")
-                return float(a) / float(b)
-
-            apply_preproc = st.button("🧹 Appliquer le pré-traitement à tout le lot")
-
-            if apply_preproc:
-                bar_pp = st.progress(0, text="Traitement en cours…")
-                total = len(portraits_files) + len(pieds_files)
-                done = 0
-                for f in portraits_files:
-                    path = DIR_PORTRAITS / f.name
-                    new_bytes = preprocess_image(
-                        path.read_bytes(), "portrait", do_correct, do_crop, _ratio_val(portrait_ratio_label)
+                correct_mode_label = "auto"
+                if do_correct:
+                    correct_choice = st.radio(
+                        "Méthode",
+                        [
+                            "Auto (balance des blancs + contraste génériques)",
+                            "Alignée sur le template de référence (Étape 1)",
+                        ],
+                        key="correct_mode_choice",
+                        label_visibility="collapsed",
                     )
-                    path.write_bytes(new_bytes)
-                    done += 1
-                    bar_pp.progress(done / total, text=f"Portraits… {f.name}")
-                for f in pieds_files:
-                    path = DIR_PIEDS / f.name
-                    new_bytes = preprocess_image(
-                        path.read_bytes(), "pieds", do_correct, do_crop, _ratio_val(pieds_ratio_label)
-                    )
-                    path.write_bytes(new_bytes)
-                    done += 1
-                    bar_pp.progress(done / total, text=f"Pieds… {f.name}")
-                st.success(f"{total} photo(s) pré-traitée(s) avec succès.")
+                    correct_mode_label = "reference" if correct_choice.startswith("Alignée") else "auto"
 
                 st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-                st.markdown('<p class="ph-asset-title">Aperçu après traitement</p>', unsafe_allow_html=True)
-                grid_pp = st.columns(8)
-                all_names = [f.name for f in portraits_files][:4] + [f.name for f in pieds_files][:4]
-                for i, name in enumerate(all_names):
-                    folder = DIR_PORTRAITS if (DIR_PORTRAITS / name).exists() and i < 4 else DIR_PIEDS
-                    with grid_pp[i % 8]:
-                        st.image(str(folder / name), width=70)
-    else:
-        st.info(
-            "OpenCV non installé — le pré-traitement automatique n'est pas "
-            "disponible. Ajoutez `opencv-python-headless` à requirements.txt."
-        )
+                st.markdown('<p class="ph-asset-title">📐 Placement du sujet</p>', unsafe_allow_html=True)
+                do_frame = st.checkbox(
+                    "Activer le placement à l'échelle (marges blanches si besoin)",
+                    value=False, key="do_frame",
+                )
 
-    match = build_pairs(
-        [f.name for f in portraits_files], [f.name for f in pieds_files]
-    )
+                frame_params = {}
+                if do_frame:
+                    for kind, default_ratio, default_scale, default_vpos in [
+                        ("portrait", "3:4", 55, 40),
+                        ("pieds", "2:3", 80, 50),
+                    ]:
+                        st.markdown(f"**{'👤 Portraits' if kind == 'portrait' else '🏃 Pieds'}**")
+                        fc1, fc2, fc3 = st.columns(3)
+                        with fc1:
+                            ratio_label = st.selectbox(
+                                "Ratio du cadre", ["3:4", "1:1", "4:5", "2:3", "9:16"],
+                                index=["3:4", "1:1", "4:5", "2:3", "9:16"].index(default_ratio),
+                                key=f"ratio_{kind}",
+                            )
+                        with fc2:
+                            scale_pct = st.slider(
+                                "Échelle du sujet (% hauteur)", 10, 100, default_scale, key=f"scale_{kind}"
+                            )
+                        with fc3:
+                            vpos_pct = st.slider(
+                                "Position verticale (% depuis le haut)", 0, 100, default_vpos, key=f"vpos_{kind}"
+                            )
+                        a, b = ratio_label.split(":")
+                        frame_params[kind] = (float(a) / float(b), scale_pct, vpos_pct)
+
+                apply_preproc = st.button("🧹 Appliquer l'édition à tout le lot")
+
+                if apply_preproc:
+                    ref_bytes = template_file.getvalue() if correct_mode_label == "reference" else None
+                    bar_pp = st.progress(0, text="Traitement en cours…")
+                    total = len(portraits_files) + len(pieds_files)
+                    done = 0
+                    for kind, files, folder in [
+                        ("portrait", portraits_files, DIR_PORTRAITS),
+                        ("pieds", pieds_files, DIR_PIEDS),
+                    ]:
+                        ratio, scale_pct, vpos_pct = frame_params.get(kind, (3 / 4, 55, 40))
+                        for f in files:
+                            path = folder / f.name
+                            new_bytes = preprocess_image(
+                                path.read_bytes(), kind, do_correct, correct_mode_label,
+                                ref_bytes, do_frame, ratio, scale_pct, vpos_pct,
+                            )
+                            path.write_bytes(new_bytes)
+                            done += 1
+                            bar_pp.progress(done / total, text=f"{f.name}")
+                    st.success(f"{total} photo(s) éditée(s) avec succès.")
+                    st.session_state["_edition_done"] = True
+
+                if st.session_state.get("_edition_done"):
+                    st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+                    st.markdown('<p class="ph-asset-title">Aperçu après édition</p>', unsafe_allow_html=True)
+                    grid_pp = st.columns(8)
+                    all_items = (
+                        [(n.name, DIR_PORTRAITS) for n in portraits_files][:4]
+                        + [(n.name, DIR_PIEDS) for n in pieds_files][:4]
+                    )
+                    for i, (name, folder) in enumerate(all_items):
+                        with grid_pp[i % 8]:
+                            st.image(str(folder / name), width=70)
+
+                    if APP_MODE == "edition":
+                        st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+                        zip_buf_ed = io.BytesIO()
+                        with zipfile.ZipFile(zip_buf_ed, "w") as z:
+                            for f in portraits_files:
+                                z.write(DIR_PORTRAITS / f.name, arcname=f"portraits/{f.name}")
+                            for f in pieds_files:
+                                z.write(DIR_PIEDS / f.name, arcname=f"pieds/{f.name}")
+                        st.download_button(
+                            "📦 TÉLÉCHARGER LES IMAGES ÉDITÉES",
+                            data=zip_buf_ed.getvalue(),
+                            file_name="POSTER_HEROES_IMAGES_EDITEES.zip",
+                            mime="application/zip",
+                        )
+        else:
+            st.info(
+                "OpenCV non installé — l'édition automatique n'est pas "
+                "disponible. Ajoutez `opencv-python-headless` à requirements.txt."
+            )
+
+    if SHOW_POSTERS:
+        match = build_pairs(
+            [f.name for f in portraits_files], [f.name for f in pieds_files]
+        )
 
 # ============================================================
 # 8bis. ÉTAPE 4 — VÉRIFICATION DE L'APPARIEMENT
 # ============================================================
 
-if match is not None:
+if SHOW_POSTERS and match is not None:
     with ph_block(
         "ph-step-4",
         "⚡ ÉTAPE 4",
