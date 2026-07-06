@@ -264,6 +264,15 @@ st.markdown(
         color: #000000 !important;
         border-color: #000000 !important;
     }
+    /* Boutons "CHOISIR" à l'intérieur des cartes de parcours : contour blanc
+       transparent, pour rester visibles sur le fond déjà noir de la carte. */
+    div[class*="st-key-ph-step-card-"] .stButton>button {
+        background-color: transparent !important;
+        border: 2px solid #FFFFFF !important;
+        color: #FFFFFF !important;
+        font-size: 16px !important;
+        padding: 12px 20px !important;
+    }
     .stDownloadButton>button {
         background-color: #F6C945 !important;
         color: #000000 !important;
@@ -562,6 +571,29 @@ def frame_subject_with_padding(
     return _frame_on_white_canvas(bgr, box_left, box_top, canvas_w, canvas_h)
 
 
+def derive_reference_framing(kind: str, reference_bytes: bytes):
+    """
+    Analyse une photo de référence et en déduit le cadrage à reproduire sur
+    tout le lot : ratio du cadre (dimensions de la référence elle-même),
+    échelle du sujet (% de la hauteur), position verticale (% depuis le haut).
+    Sans détection : le cadre de référence entier fait foi (échelle 100%,
+    centré verticalement) — repli sûr, jamais de crash.
+    """
+    ref_img = Image.open(io.BytesIO(reference_bytes))
+    ref_bgr = _pil_to_cv(ref_img)
+    h, w = ref_bgr.shape[:2]
+    canvas_ratio = w / h if h else 1.0
+
+    subject = detect_subject(ref_bgr, kind)
+    if subject is None:
+        return canvas_ratio, 100.0, 50.0
+
+    _cx, cy, _subj_w, subj_h = subject
+    target_scale_pct = max(1.0, min(100.0, subj_h / h * 100.0))
+    target_vpos_pct = max(0.0, min(100.0, cy / h * 100.0))
+    return canvas_ratio, target_scale_pct, target_vpos_pct
+
+
 def auto_white_balance(bgr):
     """Gray-world : ramène les 3 canaux à une moyenne commune (retire les dominantes)."""
     b, g, r = cv2.split(bgr.astype(np.float32))
@@ -614,7 +646,7 @@ def preprocess_image(
     img = Image.open(io.BytesIO(image_bytes))
     if not CV2_AVAILABLE:
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=95)
+        img.convert("RGB").save(buf, "JPEG", quality=100, subsampling=0)
         return buf.getvalue()
 
     bgr = _pil_to_cv(img)
@@ -631,7 +663,7 @@ def preprocess_image(
         bgr = frame_subject_with_padding(bgr, kind, canvas_ratio, target_scale_pct, target_vpos_pct)
 
     out_buf = io.BytesIO()
-    _cv_to_pil(bgr).save(out_buf, format="JPEG", quality=95)
+    _cv_to_pil(bgr).save(out_buf, "JPEG", quality=100, subsampling=0)
     return out_buf.getvalue()
 
 
@@ -861,71 +893,134 @@ def build_manifest(match: MatchResult, template_name: str) -> dict:
 # 5bis. ÉTAPE 0 — CHOIX DU PARCOURS
 # ============================================================
 
-with ph_block(
-    "ph-step-0",
-    "🧭 PARCOURS",
-    "QUE SOUHAITEZ-VOUS FAIRE ?",
-    "Choisissez ce que l'app doit produire avant de continuer.",
-):
-    parcours_choice = st.radio(
-        "parcours",
-        [
-            "🎨 Édition des images (correction + cadrage, sans IA)",
-            "⚡ Création des posters (Nano Banana Pro, images déjà éditées)",
-            "🎨⚡ Édition des images + Création des posters",
-        ],
-        index=2,
-        key="parcours_choice",
-        label_visibility="collapsed",
+# ============================================================
+# 5bis. ÉTAPE 0 — CHOIX DU PARCOURS (navigation par cartes)
+# ============================================================
+
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = None
+
+if st.session_state.app_mode is None:
+    st.markdown(
+        '<p class="ph-block-title" style="text-align:center;color:#000 !important;font-size:26px;">'
+        "QUE SOUHAITEZ-VOUS FAIRE ?</p>"
+        '<p style="text-align:center;color:#000;opacity:0.7;margin-bottom:24px;">'
+        "Choisissez un parcours pour continuer</p>",
+        unsafe_allow_html=True,
     )
 
-if parcours_choice.startswith("🎨 Édition"):
-    APP_MODE = "edition"
-elif parcours_choice.startswith("⚡ Création"):
-    APP_MODE = "posters"
-else:
-    APP_MODE = "both"
+    cards = [
+        (
+            "edition", "🎨", "ÉDITION DES IMAGES",
+            "Correction colorimétrique + cadrage automatique, calés sur vos "
+            "références. Sans IA générative, sans coût.",
+        ),
+        (
+            "posters", "⚡", "CRÉATION DES POSTERS",
+            "Vos photos sont déjà éditées ailleurs. Passe directement à la "
+            "génération des posters avec Nano Banana Pro.",
+        ),
+        (
+            "both", "🎨⚡", "ÉDITION + POSTERS",
+            "Le parcours complet : édition automatique des photos, puis "
+            "génération des posters.",
+        ),
+    ]
+    card_cols = st.columns(3)
+    for col, (mode_id, icon, title, desc) in zip(card_cols, cards):
+        with col:
+            with st.container(key=f"ph-step-card-{mode_id}"):
+                st.markdown(
+                    f'<p style="font-size:42px;text-align:center;margin-bottom:6px;">{icon}</p>'
+                    f'<p class="ph-block-title" style="text-align:center;font-size:19px;">{title}</p>'
+                    f'<p class="ph-block-desc" style="text-align:center;min-height:75px;">{desc}</p>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("CHOISIR →", key=f"choose_{mode_id}", use_container_width=True):
+                    st.session_state.app_mode = mode_id
+                    st.rerun()
+    st.stop()
 
+APP_MODE = st.session_state.app_mode
 SHOW_EDITION = APP_MODE in ("edition", "both")
 SHOW_POSTERS = APP_MODE in ("posters", "both")
 
+back_col, _ = st.columns([1, 5])
+with back_col:
+    if st.button("← Changer de parcours"):
+        st.session_state.app_mode = None
+        st.rerun()
+
 # ============================================================
-# 6. ÉTAPE 1 — TEMPLATE
+# 6. ÉTAPE 1 — RÉFÉRENCES
 # ============================================================
 
 with ph_block(
     "ph-step-1",
     "⚡ ÉTAPE 1",
-    "LE TEMPLATE",
-    (
-        "Déposez le poster de référence (.jpg). Nano Banana Pro s'appuiera "
-        "dessus pour ne remplacer que le personnage."
-        if SHOW_POSTERS
-        else "Déposez le poster de référence (.jpg) — utilisé comme référence "
-        "colorimétrique pour l'édition des photos."
-    ),
+    "RÉFÉRENCES",
+    "Déposez les images de référence : elles pilotent la colorimétrie et le "
+    "cadrage appliqués à tout le lot.",
 ):
-    template_file = st.file_uploader(
-        "template", type=["jpg", "jpeg"], key="template", label_visibility="collapsed"
-    )
-    if template_file:
+    template_file = None
+    portrait_ref_file = None
+    pieds_ref_file = None
+
+    if SHOW_POSTERS:
+        st.markdown('<p class="ph-asset-title">🖼️ Poster de référence</p>', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="ph-asset-desc">Utilisé par Nano Banana Pro pour la mise en page finale.</p>',
+            unsafe_allow_html=True,
+        )
+        template_file = st.file_uploader(
+            "template", type=["jpg", "jpeg"], key="template", label_visibility="collapsed"
+        )
+        if template_file:
+            tcol1, tcol2 = st.columns([1, 3])
+            with tcol1:
+                st.image(template_file, caption=template_file.name, width=180)
+            with tcol2:
+                tmpl_img = Image.open(template_file)
+                st.markdown(
+                    f"""
+                    <p class="ph-asset-title">Format de sortie visé</p>
+                    <p class="ph-asset-desc" style="opacity:0.9;">
+                    {PRINT_WIDTH_CM} × {PRINT_HEIGHT_CM} cm · {PRINT_DPI} dpi · {COLOR_PROFILE}<br>
+                    Soit {PRINT_WIDTH_PX} × {PRINT_HEIGHT_PX} px en sortie finale.<br><br>
+                    Template importé : {tmpl_img.width} × {tmpl_img.height} px
+                    </p>
+                    """,
+                    unsafe_allow_html=True,
+                )
         st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-        tcol1, tcol2 = st.columns([1, 3])
-        with tcol1:
-            st.image(template_file, caption=template_file.name, width=180)
-        with tcol2:
-            tmpl_img = Image.open(template_file)
-            st.markdown(
-                f"""
-                <p class="ph-asset-title">Format de sortie visé</p>
-                <p class="ph-asset-desc" style="opacity:0.9;">
-                {PRINT_WIDTH_CM} × {PRINT_HEIGHT_CM} cm · {PRINT_DPI} dpi · {COLOR_PROFILE}<br>
-                Soit {PRINT_WIDTH_PX} × {PRINT_HEIGHT_PX} px en sortie finale.<br><br>
-                Template importé : {tmpl_img.width} × {tmpl_img.height} px
-                </p>
-                """,
-                unsafe_allow_html=True,
+
+    if SHOW_EDITION:
+        st.markdown(
+            '<p class="ph-asset-title">🎯 Références d\'édition (1 photo idéale par catégorie)</p>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<p class="ph-asset-desc">Le cadrage (échelle + position) et la colorimétrie de ces '
+            "deux références seront reproduits automatiquement sur tout le lot.</p>",
+            unsafe_allow_html=True,
+        )
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            st.markdown('<p class="ph-asset-title">👤 Référence portrait</p>', unsafe_allow_html=True)
+            portrait_ref_file = st.file_uploader(
+                "portrait_ref", type=["jpg", "jpeg", "png"], key="portrait_ref",
+                label_visibility="collapsed",
             )
+            if portrait_ref_file:
+                st.image(portrait_ref_file, width=150)
+        with rc2:
+            st.markdown('<p class="ph-asset-title">🏃 Référence pieds</p>', unsafe_allow_html=True)
+            pieds_ref_file = st.file_uploader(
+                "pieds_ref", type=["jpg", "jpeg", "png"], key="pieds_ref",
+                label_visibility="collapsed",
+            )
+            if pieds_ref_file:
+                st.image(pieds_ref_file, width=150)
 
 # ============================================================
 # 7. ÉTAPE 2 — PHOTOS JOUEURS
@@ -966,8 +1061,12 @@ with ph_block(
 
 match: MatchResult | None = None
 
-if template_file and portraits_files and pieds_files:
-    save_uploads([template_file], DIR_TEMPLATE)
+refs_ready = (not SHOW_EDITION) or bool(portrait_ref_file and pieds_ref_file)
+template_ready = (not SHOW_POSTERS) or bool(template_file)
+
+if refs_ready and template_ready and portraits_files and pieds_files:
+    if template_file:
+        save_uploads([template_file], DIR_TEMPLATE)
     save_uploads(portraits_files, DIR_PORTRAITS)
     save_uploads(pieds_files, DIR_PIEDS)
 
@@ -977,94 +1076,85 @@ if template_file and portraits_files and pieds_files:
                 "ph-step-3",
                 "⚡ ÉTAPE 3",
                 "ÉDITION DES IMAGES (SANS IA)",
-                "Correction colorimétrique calée sur le template + placement du "
-                "sujet à l'échelle/position voulue, avec marges blanches si la "
-                "photo source ne couvre pas tout le cadre. Aucun appel API.",
+                "Le cadrage (échelle + position) et la colorimétrie de vos deux "
+                "références sont automatiquement reproduits sur tout le lot. "
+                "Marges blanches si une photo source ne couvre pas tout le "
+                "cadre. Export 100% qualité, mêmes noms de fichiers.",
             ):
-                st.markdown('<p class="ph-asset-title">🎨 Correction colorimétrique</p>', unsafe_allow_html=True)
-                do_correct = st.checkbox(
-                    "Activer la correction colorimétrique", value=True, key="do_correct"
+                portrait_ratio, portrait_scale, portrait_vpos = derive_reference_framing(
+                    "portrait", portrait_ref_file.getvalue()
                 )
-                correct_mode_label = "auto"
-                if do_correct:
-                    correct_choice = st.radio(
-                        "Méthode",
-                        [
-                            "Auto (balance des blancs + contraste génériques)",
-                            "Alignée sur le template de référence (Étape 1)",
-                        ],
-                        key="correct_mode_choice",
-                        label_visibility="collapsed",
+                pieds_ratio, pieds_scale, pieds_vpos = derive_reference_framing(
+                    "pieds", pieds_ref_file.getvalue()
+                )
+
+                st.markdown('<p class="ph-asset-title">📐 Cadrage détecté sur vos références</p>', unsafe_allow_html=True)
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    st.caption(
+                        f"👤 Portrait — ratio {portrait_ratio:.2f}, sujet à "
+                        f"{portrait_scale:.0f}% de hauteur, position {portrait_vpos:.0f}% depuis le haut"
                     )
-                    correct_mode_label = "reference" if correct_choice.startswith("Alignée") else "auto"
+                with dc2:
+                    st.caption(
+                        f"🏃 Pieds — ratio {pieds_ratio:.2f}, sujet à "
+                        f"{pieds_scale:.0f}% de hauteur, position {pieds_vpos:.0f}% depuis le haut"
+                    )
 
-                st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-                st.markdown('<p class="ph-asset-title">📐 Placement du sujet</p>', unsafe_allow_html=True)
-                do_frame = st.checkbox(
-                    "Activer le placement à l'échelle (marges blanches si besoin)",
-                    value=False, key="do_frame",
+                with st.expander("🔧 Ajustement fin (optionnel)"):
+                    ac1, ac2 = st.columns(2)
+                    with ac1:
+                        st.markdown("**👤 Portrait**")
+                        portrait_scale = st.slider("Échelle (%)", 10, 100, int(portrait_scale), key="adj_scale_p")
+                        portrait_vpos = st.slider("Position verticale (%)", 0, 100, int(portrait_vpos), key="adj_vpos_p")
+                    with ac2:
+                        st.markdown("**🏃 Pieds**")
+                        pieds_scale = st.slider("Échelle (%)", 10, 100, int(pieds_scale), key="adj_scale_f")
+                        pieds_vpos = st.slider("Position verticale (%)", 0, 100, int(pieds_vpos), key="adj_vpos_f")
+
+                do_correct = st.checkbox(
+                    "Aligner la colorimétrie sur les références", value=True, key="do_correct"
                 )
-
-                frame_params = {}
-                if do_frame:
-                    for kind, default_ratio, default_scale, default_vpos in [
-                        ("portrait", "3:4", 55, 40),
-                        ("pieds", "2:3", 80, 50),
-                    ]:
-                        st.markdown(f"**{'👤 Portraits' if kind == 'portrait' else '🏃 Pieds'}**")
-                        fc1, fc2, fc3 = st.columns(3)
-                        with fc1:
-                            ratio_label = st.selectbox(
-                                "Ratio du cadre", ["3:4", "1:1", "4:5", "2:3", "9:16"],
-                                index=["3:4", "1:1", "4:5", "2:3", "9:16"].index(default_ratio),
-                                key=f"ratio_{kind}",
-                            )
-                        with fc2:
-                            scale_pct = st.slider(
-                                "Échelle du sujet (% hauteur)", 10, 100, default_scale, key=f"scale_{kind}"
-                            )
-                        with fc3:
-                            vpos_pct = st.slider(
-                                "Position verticale (% depuis le haut)", 0, 100, default_vpos, key=f"vpos_{kind}"
-                            )
-                        a, b = ratio_label.split(":")
-                        frame_params[kind] = (float(a) / float(b), scale_pct, vpos_pct)
+                do_frame = st.checkbox(
+                    "Appliquer le cadrage détecté ci-dessus", value=True, key="do_frame"
+                )
 
                 apply_preproc = st.button("🧹 Appliquer l'édition à tout le lot")
 
                 if apply_preproc:
-                    ref_bytes = template_file.getvalue() if correct_mode_label == "reference" else None
                     bar_pp = st.progress(0, text="Traitement en cours…")
                     total = len(portraits_files) + len(pieds_files)
                     done = 0
-                    for kind, files, folder in [
-                        ("portrait", portraits_files, DIR_PORTRAITS),
-                        ("pieds", pieds_files, DIR_PIEDS),
-                    ]:
-                        ratio, scale_pct, vpos_pct = frame_params.get(kind, (3 / 4, 55, 40))
+                    jobs = [
+                        ("portrait", portraits_files, DIR_PORTRAITS, portrait_ref_file.getvalue(),
+                         portrait_ratio, portrait_scale, portrait_vpos),
+                        ("pieds", pieds_files, DIR_PIEDS, pieds_ref_file.getvalue(),
+                         pieds_ratio, pieds_scale, pieds_vpos),
+                    ]
+                    for kind, files, folder, ref_bytes, ratio, scale_pct, vpos_pct in jobs:
                         for f in files:
                             path = folder / f.name
                             new_bytes = preprocess_image(
-                                path.read_bytes(), kind, do_correct, correct_mode_label,
+                                path.read_bytes(), kind, do_correct, "reference",
                                 ref_bytes, do_frame, ratio, scale_pct, vpos_pct,
                             )
-                            path.write_bytes(new_bytes)
+                            path.write_bytes(new_bytes)  # même nom de fichier, écrasé sur place
                             done += 1
                             bar_pp.progress(done / total, text=f"{f.name}")
-                    st.success(f"{total} photo(s) éditée(s) avec succès.")
+                    st.success(f"{total} photo(s) éditée(s) avec succès — 100% qualité, noms préservés.")
                     st.session_state["_edition_done"] = True
 
                 if st.session_state.get("_edition_done"):
                     st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-                    st.markdown('<p class="ph-asset-title">Aperçu après édition</p>', unsafe_allow_html=True)
-                    grid_pp = st.columns(8)
+                    st.markdown('<p class="ph-asset-title">Aperçu (taille moyenne)</p>', unsafe_allow_html=True)
+                    grid_pp = st.columns(4)
                     all_items = (
-                        [(n.name, DIR_PORTRAITS) for n in portraits_files][:4]
-                        + [(n.name, DIR_PIEDS) for n in pieds_files][:4]
+                        [(n.name, DIR_PORTRAITS) for n in portraits_files][:2]
+                        + [(n.name, DIR_PIEDS) for n in pieds_files][:2]
                     )
                     for i, (name, folder) in enumerate(all_items):
-                        with grid_pp[i % 8]:
-                            st.image(str(folder / name), width=70)
+                        with grid_pp[i % 4]:
+                            st.image(str(folder / name), caption=name, width=220)
 
                     if APP_MODE == "edition":
                         st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
@@ -1075,7 +1165,7 @@ if template_file and portraits_files and pieds_files:
                             for f in pieds_files:
                                 z.write(DIR_PIEDS / f.name, arcname=f"pieds/{f.name}")
                         st.download_button(
-                            "📦 TÉLÉCHARGER LES IMAGES ÉDITÉES",
+                            "📦 TÉLÉCHARGER LES IMAGES ÉDITÉES (noms d'origine préservés)",
                             data=zip_buf_ed.getvalue(),
                             file_name="POSTER_HEROES_IMAGES_EDITEES.zip",
                             mime="application/zip",
