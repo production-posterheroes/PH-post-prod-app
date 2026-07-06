@@ -460,9 +460,19 @@ _HOG_PERSON_DETECTOR = None
 def _get_face_cascade():
     global _FACE_CASCADE
     if _FACE_CASCADE is None and CV2_AVAILABLE:
-        _FACE_CASCADE = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
+        bundled_path = APP_DIR / "haarcascade_frontalface_default.xml"
+        if bundled_path.exists():
+            cascade_path = str(bundled_path)
+        else:
+            # Repli : certaines installations d'opencv-python-headless
+            # n'exposent pas cv2.data selon la version — d'où l'AttributeError
+            # possible ici si le fichier n'est pas embarqué avec l'app.
+            try:
+                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            except AttributeError:
+                return None
+        loaded = cv2.CascadeClassifier(cascade_path)
+        _FACE_CASCADE = loaded if not loaded.empty() else None
     return _FACE_CASCADE
 
 
