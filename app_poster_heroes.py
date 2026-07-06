@@ -24,6 +24,14 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
 try:
+    import numpy as np
+    import cv2
+
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
+try:
     from google import genai
     from google.genai import types as genai_types
 
@@ -428,6 +436,129 @@ def save_uploads(files, folder: Path) -> None:
 
 
 # ============================================================
+# 4bis. PRÉ-TRAITEMENT AUTOMATIQUE (SANS IA — algorithmes classiques)
+# ============================================================
+# Corrige exposition/balance des blancs et recadre automatiquement les
+# portraits (détection de visage) et photos en pieds (détection de
+# silhouette), avec des méthodes déterministes OpenCV — aucun appel API,
+# aucun coût, résultat reproductible à l'identique.
+
+_FACE_CASCADE = None
+_HOG_PERSON_DETECTOR = None
+
+
+def _get_face_cascade():
+    global _FACE_CASCADE
+    if _FACE_CASCADE is None and CV2_AVAILABLE:
+        _FACE_CASCADE = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+    return _FACE_CASCADE
+
+
+def _get_hog_detector():
+    global _HOG_PERSON_DETECTOR
+    if _HOG_PERSON_DETECTOR is None and CV2_AVAILABLE:
+        hog = cv2.HOGDescriptor()
+        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        _HOG_PERSON_DETECTOR = hog
+    return _HOG_PERSON_DETECTOR
+
+
+def _pil_to_cv(img: Image.Image):
+    return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+
+
+def _cv_to_pil(arr) -> Image.Image:
+    return Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
+
+
+def auto_white_balance(bgr):
+    """Gray-world : ramène les 3 canaux à une moyenne commune (retire les dominantes)."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    avg = (b.mean() + g.mean() + r.mean()) / 3.0
+    b *= avg / max(b.mean(), 1e-6)
+    g *= avg / max(g.mean(), 1e-6)
+    r *= avg / max(r.mean(), 1e-6)
+    return np.clip(cv2.merge([b, g, r]), 0, 255).astype(np.uint8)
+
+
+def auto_exposure_contrast(bgr):
+    """CLAHE sur le canal de luminance (LAB) : ré-équilibre exposition/contraste local."""
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l2 = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge([l2, a, b]), cv2.COLOR_LAB2BGR)
+
+
+def _crop_box_centered(bgr, cx: float, cy: float, box_w: float, box_h: float):
+    h, w = bgr.shape[:2]
+    left = int(max(0, min(cx - box_w / 2, w - box_w)))
+    top = int(max(0, min(cy - box_h / 2, h - box_h)))
+    box_w, box_h = int(min(box_w, w)), int(min(box_h, h))
+    return bgr[top: top + box_h, left: left + box_w]
+
+
+def auto_crop_portrait(bgr, target_ratio: float = 3 / 4):
+    """Centre le cadrage sur le visage détecté (Haar cascade). Sans détection : image inchangée."""
+    cascade = _get_face_cascade()
+    if cascade is None:
+        return bgr
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    if len(faces) == 0:
+        return bgr
+    x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+    cx, cy = x + fw / 2, y + fh * 0.45  # un peu au-dessus du centre du visage (marge front/cheveux)
+    crop_h = fh * 3.2  # marge haut (cheveux) + bas (épaules)
+    crop_w = crop_h * target_ratio
+    return _crop_box_centered(bgr, cx, cy, crop_w, crop_h)
+
+
+def auto_crop_pieds(bgr, target_ratio: float = 2 / 3):
+    """Centre le cadrage sur la silhouette détectée (HOG). Sans détection : image inchangée."""
+    hog = _get_hog_detector()
+    if hog is None:
+        return bgr
+    rects, weights = hog.detectMultiScale(bgr, winStride=(8, 8), padding=(8, 8), scale=1.05)
+    if len(rects) == 0:
+        return bgr
+    idx = int(np.argmax(weights)) if len(weights) else 0
+    x, y, pw, ph = rects[idx]
+    cx, cy = x + pw / 2, y + ph / 2
+    crop_h = ph * 1.25  # marge tête + pieds
+    crop_w = crop_h * target_ratio
+    return _crop_box_centered(bgr, cx, cy, crop_w, crop_h)
+
+
+def preprocess_image(
+    image_bytes: bytes,
+    kind: str,  # "portrait" | "pieds"
+    do_correct: bool,
+    do_crop: bool,
+    target_ratio: float,
+) -> bytes:
+    """Pipeline complet : correction colorimétrique puis recadrage, sans IA."""
+    img = Image.open(io.BytesIO(image_bytes))
+    if not CV2_AVAILABLE:
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=95)
+        return buf.getvalue()
+
+    bgr = _pil_to_cv(img)
+    if do_correct:
+        bgr = auto_white_balance(bgr)
+        bgr = auto_exposure_contrast(bgr)
+    if do_crop:
+        bgr = auto_crop_portrait(bgr, target_ratio) if kind == "portrait" else auto_crop_pieds(bgr, target_ratio)
+
+    out_buf = io.BytesIO()
+    _cv_to_pil(bgr).save(out_buf, format="JPEG", quality=95)
+    return out_buf.getvalue()
+
+
+# ============================================================
 # 5. GÉNÉRATION (PLACEHOLDER — POINT DE BRANCHEMENT API)
 # ============================================================
 
@@ -447,7 +578,7 @@ DEFAULT_PROMPT = (
     "le personnage présent sur le poster par ce nouvel athlète, en fusionnant "
     "naturellement son visage (2) avec sa posture/action (3). Ne modifie rien "
     "d'autre sur le poster.\n"
-    "IMPORTANT — étalonnage colorimétrique : les photos sources (2) et (3) "
+    "IMPORTANT 1— étalonnage colorimétrique : les photos sources (2) et (3) "
     "peuvent être des clichés bruts, non retouchés, avec une balance des "
     "blancs, un contraste et une saturation différentes les unes des autres, "
     "comparé au poster. Corrige impérativement la colorimétrie du portrait et "
@@ -455,10 +586,21 @@ DEFAULT_PROMPT = (
     "le même style de colorimétrie, ambiance chromatique, contraste et "
     "température de couleur du portrait et personnage en action du poster de "
     "référence. Aucune photo brute, plate ou désaturée ne doit transparaître : "
-    "le rendu final doit donner la même ambiance colorimétrique que l'image "
-    "de référence.\n"
-    "Éclairage et perspective cohérents avec le décor d'origine. Rendu final "
-    "net, qualité studio, sans filigrane."
+    "le rendu final doit donner la même ambiance colorimétrique et la force "
+    "de netteté que l'image de référence.\n"
+    "IMPORTANT 2— Respecter toujours la position et la direction originale "
+    "des photos sources (2) et (3). Tu ne dois pas inventer une nouvelle "
+    "position, ni faire d'effet miroir.\n"
+    "IMPORTANT 3— Les ombres en dessous des pieds lors de l'ajout sur le "
+    "nouveau poster doivent être toujours travaillés de façon réaliste et "
+    "remarquée.\n"
+    "IMPORTANT 4— Les dimensions dans l'espace de l'ajout des photos sources "
+    "(2) et (3) doivent respecter au maximum les dimensions dans l'espace du "
+    "poster de référence. Dans l'unique option qu'un bras de la photo source "
+    "EN ACTION (3) passe devant la bouche et le nez la photo source PORTRAIT "
+    "(2), tu peux reorganiser l'espace et la dimension de ces dernières afin "
+    "de laisser place pleinement à leur visibilité.\n"
+    "Rendu final net, intense, qualité studio, sans filigrane."
 )
 
 
@@ -689,7 +831,7 @@ with ph_block(
         )
 
 # ============================================================
-# 8. ÉTAPE 3 — VÉRIFICATION DE L'APPARIEMENT
+# 8. ÉTAPE 3 — PRÉ-TRAITEMENT AUTOMATIQUE (SANS IA)
 # ============================================================
 
 match: MatchResult | None = None
@@ -699,13 +841,89 @@ if template_file and portraits_files and pieds_files:
     save_uploads(portraits_files, DIR_PORTRAITS)
     save_uploads(pieds_files, DIR_PIEDS)
 
+    if CV2_AVAILABLE:
+        with ph_block(
+            "ph-step-3",
+            "⚡ ÉTAPE 3",
+            "PRÉ-TRAITEMENT AUTOMATIQUE (SANS IA)",
+            "Équilibrage exposition/balance des blancs et recadrage automatique "
+            "(détection visage / silhouette) — algorithmes classiques, aucun "
+            "appel API, gratuit et instantané. Remplace le passage par Lightroom.",
+        ):
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                do_correct = st.checkbox(
+                    "Corriger exposition + balance des blancs", value=True, key="do_correct"
+                )
+            with pc2:
+                do_crop = st.checkbox(
+                    "Recadrer automatiquement (visage / silhouette)", value=False, key="do_crop"
+                )
+
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                portrait_ratio_label = st.selectbox(
+                    "Ratio cible — portraits", ["3:4", "1:1", "4:5", "2:3"], index=0, key="portrait_ratio"
+                )
+            with rc2:
+                pieds_ratio_label = st.selectbox(
+                    "Ratio cible — pieds", ["2:3", "3:4", "1:1"], index=0, key="pieds_ratio"
+                )
+
+            def _ratio_val(label: str) -> float:
+                a, b = label.split(":")
+                return float(a) / float(b)
+
+            apply_preproc = st.button("🧹 Appliquer le pré-traitement à tout le lot")
+
+            if apply_preproc:
+                bar_pp = st.progress(0, text="Traitement en cours…")
+                total = len(portraits_files) + len(pieds_files)
+                done = 0
+                for f in portraits_files:
+                    path = DIR_PORTRAITS / f.name
+                    new_bytes = preprocess_image(
+                        path.read_bytes(), "portrait", do_correct, do_crop, _ratio_val(portrait_ratio_label)
+                    )
+                    path.write_bytes(new_bytes)
+                    done += 1
+                    bar_pp.progress(done / total, text=f"Portraits… {f.name}")
+                for f in pieds_files:
+                    path = DIR_PIEDS / f.name
+                    new_bytes = preprocess_image(
+                        path.read_bytes(), "pieds", do_correct, do_crop, _ratio_val(pieds_ratio_label)
+                    )
+                    path.write_bytes(new_bytes)
+                    done += 1
+                    bar_pp.progress(done / total, text=f"Pieds… {f.name}")
+                st.success(f"{total} photo(s) pré-traitée(s) avec succès.")
+
+                st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
+                st.markdown('<p class="ph-asset-title">Aperçu après traitement</p>', unsafe_allow_html=True)
+                grid_pp = st.columns(8)
+                all_names = [f.name for f in portraits_files][:4] + [f.name for f in pieds_files][:4]
+                for i, name in enumerate(all_names):
+                    folder = DIR_PORTRAITS if (DIR_PORTRAITS / name).exists() and i < 4 else DIR_PIEDS
+                    with grid_pp[i % 8]:
+                        st.image(str(folder / name), width=70)
+    else:
+        st.info(
+            "OpenCV non installé — le pré-traitement automatique n'est pas "
+            "disponible. Ajoutez `opencv-python-headless` à requirements.txt."
+        )
+
     match = build_pairs(
         [f.name for f in portraits_files], [f.name for f in pieds_files]
     )
 
+# ============================================================
+# 8bis. ÉTAPE 4 — VÉRIFICATION DE L'APPARIEMENT
+# ============================================================
+
+if match is not None:
     with ph_block(
-        "ph-step-3",
-        "⚡ ÉTAPE 3",
+        "ph-step-4",
+        "⚡ ÉTAPE 4",
         "VÉRIFICATION DE L'APPARIEMENT",
         f"{len(match.pairs)} paire(s) détectée(s) sur "
         f"{len(portraits_files)} portrait(s) / {len(pieds_files)} photo(s) en pieds.",
@@ -752,15 +970,15 @@ if template_file and portraits_files and pieds_files:
                     st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# 9. LANCEMENT & ÉTAPE 4 — RÉCUPÉRATION
+# 9. LANCEMENT & ÉTAPE 5 — RÉGLAGES
 # ============================================================
 
 if match and match.pairs:
     client = get_genai_client()
 
     with ph_block(
-        "ph-step-4",
-        "⚡ ÉTAPE 4",
+        "ph-step-5",
+        "⚡ ÉTAPE 5",
         "RÉGLAGES & LANCEMENT",
         "Ajustez le prompt envoyé à Nano Banana Pro si besoin (colorimétrie, "
         "cadrage, style...), choisissez le mode, puis lancez.",
@@ -869,8 +1087,8 @@ if match and match.pairs:
             json.dump(manifest, mf, ensure_ascii=False, indent=2)
 
         with ph_block(
-            "ph-step-5",
-            "📥 ÉTAPE 5",
+            "ph-step-6",
+            "📥 ÉTAPE 6",
             "RÉCUPÉRATION",
             (
                 "Posters générés par Nano Banana Pro, prêts à l'impression."
