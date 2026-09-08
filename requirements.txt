@@ -1,4 +1,3 @@
 pyarrow==19.0.0
 streamlit
 pillow
-opencv-python-headless
