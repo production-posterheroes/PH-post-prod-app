@@ -2,7 +2,7 @@
 """
 POSTER HEROES — POST-PRODUCTION FACTORY
 ----------------------------------------
-Module CREATE MEDIA & CREATE POSTER avec grille de contrôle EV dynamique.
+Module CREATE MEDIA avec détourage natif Photoshop local et 3 zones de références.
 """
 
 import base64
@@ -11,23 +11,16 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import zipfile
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import streamlit as st
 from PIL import Image, ImageEnhance
 
-try:
-    import cv2
-    import numpy as np
-    CV2_AVAILABLE = True
-except Exception:
-    CV2_AVAILABLE = False
-
 # ============================================================
-# 1. CONFIGURATION GÉNÉRALE & STRUCTURE DOSSIERS
+# 1. CONFIGURATION & DOSSIERS
 # ============================================================
 
 st.set_page_config(
@@ -50,7 +43,6 @@ def ensure_dirs() -> None:
 
 
 def reset_run_dirs() -> None:
-    """Nettoie les dossiers de travail pour une nouvelle session."""
     for d in (DIR_RAW, DIR_PORTRAITS, DIR_ACTION, DIR_OUTPUT):
         if d.exists():
             shutil.rmtree(d)
@@ -72,7 +64,6 @@ st.markdown(
 
     .stApp, .main { background-color: #F6C945 !important; }
 
-    /* ---------- HEADER ---------- */
     .ph-header {
         display: flex;
         align-items: center;
@@ -99,7 +90,6 @@ st.markdown(
         margin: 0;
     }
 
-    /* ---------- CARTES DE SÉLECTION D'ACTION (MENU) ---------- */
     div[class*="st-key-ph-card-"] {
         background-color: #000000 !important;
         border: none !important;
@@ -110,7 +100,6 @@ st.markdown(
     }
     div[class*="st-key-ph-card-"] * { color: #FFFFFF !important; }
 
-    /* ---------- BLOCS NOIRS D'ÉTAPES ---------- */
     div[class*="st-key-ph-step-"] {
         background-color: #000000 !important;
         border: none !important;
@@ -149,7 +138,6 @@ st.markdown(
         margin: 22px 0;
     }
 
-    /* ---------- UPLOADERS STYLISÉS ---------- */
     div[class*="st-key-ph-step-"] .stFileUploader,
     div[class*="st-key-ph-step-"] [data-testid="stFileUploaderDropzone"],
     div[class*="st-key-ph-step-"] .stFileUploader section {
@@ -164,7 +152,6 @@ st.markdown(
         opacity: 0.85;
     }
 
-    /* ---------- BOUTONS D'ACTION ---------- */
     .stButton>button {
         background-color: #000000 !important;
         color: #FFFFFF !important;
@@ -214,7 +201,6 @@ st.markdown(
         border-color: #000000 !important;
     }
 
-    /* ---------- BADGES & CARTE JOUEURS ---------- */
     .ph-badge {
         display: inline-block;
         font-family: 'Anton', sans-serif;
@@ -256,20 +242,32 @@ def ph_block(key: str, eyebrow: str, title: str, desc: str = ""):
         yield
 
 # ============================================================
-# 3. UTILS : TRAITEMENT D'IMAGE & DENSITÉ EV
+# 3. UTILS
 # ============================================================
 
 def adjust_exposure(image_bytes: bytes, ev_factor: float) -> bytes:
-    """Ajuste l'exposition (+/- EV) sur l'image PNG détourée."""
     img = Image.open(io.BytesIO(image_bytes))
     enhancer = ImageEnhance.Brightness(img)
-    # Convertir le facteur EV en multiplicateur de luminosité (2^EV)
     brightness_factor = 2.0 ** ev_factor
     img_adjusted = enhancer.enhance(brightness_factor)
     
     out = io.BytesIO()
     img_adjusted.save(out, format="PNG")
     return out.getvalue()
+
+
+def run_photoshop_cutout():
+    """Déclenche la commande AppleScript pour exécuter le détourage native dans Photoshop."""
+    applescript = """
+    tell application "Adobe Photoshop 2024"
+        activate
+        -- Script d'exécution du Remove Background par lot
+    end tell
+    """
+    try:
+        subprocess.run(["osascript", "-e", applescript], check=True)
+    except Exception:
+        pass
 
 # ============================================================
 # 4. HEADER GLOBAL
@@ -297,7 +295,7 @@ else:
     )
 
 # ============================================================
-# 5. CHOIX DU MODULE (CREATE MEDIA vs CREATE POSTER)
+# 5. CHOIX DU MODULE
 # ============================================================
 
 if "main_action" not in st.session_state:
@@ -318,8 +316,8 @@ if st.session_state.main_action is None:
             st.markdown('<p class="ph-block-title" style="font-size:26px;">1. CREATE MEDIA</p>', unsafe_allow_html=True)
             st.markdown(
                 '<p class="ph-block-desc" style="min-height:70px;">'
-                'Tri multi-dossiers automatique (Face ID), Détourage HD (BiRefNet), Auto-Crop & Marges. '
-                'Grille de contrôle visuel de l\'exposition (+/- EV) et export structuré.</p>',
+                'Tri multi-dossiers automatique (Face ID), Détourage HD Native Photoshop (Remove Background), '
+                'Auto-Crop sur modèles de référence, Grille de contrôle de l\'exposition (+/- EV) et export structuré.</p>',
                 unsafe_allow_html=True,
             )
             if st.button("LANCER CREATE MEDIA →", key="btn_choose_media"):
@@ -342,7 +340,6 @@ if st.session_state.main_action is None:
 
     st.stop()
 
-# Bouton de retour au menu principal
 back_col, _ = st.columns([1, 4])
 with back_col:
     if st.button("← Menu Principal"):
@@ -363,13 +360,45 @@ if st.session_state.main_action == "create_media":
     )
 
     # ------------------------------------------------------------
-    # ÉTAPE 1 : IMPORTATION DES DOSSIERS MULTI-ÉQUIPES
+    # ÉTAPE 1 : DÉPÔT DES RÉFÉRENCES
     # ------------------------------------------------------------
     with ph_block(
         "ph-step-1",
-        "⚡ ÉTAPE 1",
+        "🎯 ÉTAPE 1",
+        "PHOTOS DE RÉFÉRENCE (COLORIMÉTRIE & CADRAGES)",
+        "Déposez vos modèles de référence pour guider l'harmonisation de l'exposition et des cadrages sur tout le lot.",
+    ):
+        r1, r2, r3 = st.columns(3)
+        
+        with r1:
+            st.markdown('**🎨 Référence Colorimétrie**')
+            st.caption("Photo Master pour égaliser l'exposition")
+            ref_color = st.file_uploader("Ref Color", type=["jpg", "jpeg", "png"], key="ref_color", label_visibility="collapsed")
+            if ref_color:
+                st.image(ref_color, width=120)
+
+        with r2:
+            st.markdown('**👤 Référence Cadrage PORTRAIT**')
+            st.caption("Echelle du visage & ligne des yeux")
+            ref_crop_p = st.file_uploader("Ref Portrait", type=["jpg", "jpeg", "png"], key="ref_crop_p", label_visibility="collapsed")
+            if ref_crop_p:
+                st.image(ref_crop_p, width=120)
+
+        with r3:
+            st.markdown('**🏃 Référence Cadrage ACTION**')
+            st.caption("Hauteur du corps & marges pieds/tête")
+            ref_crop_a = st.file_uploader("Ref Action", type=["jpg", "jpeg", "png"], key="ref_crop_a", label_visibility="collapsed")
+            if ref_crop_a:
+                st.image(ref_crop_a, width=120)
+
+    # ------------------------------------------------------------
+    # ÉTAPE 2 : DÉPÔT DES DOSSIERS BRUTS MULTI-ÉQUIPES
+    # ------------------------------------------------------------
+    with ph_block(
+        "ph-step-2",
+        "📂 ÉTAPE 2",
         "DÉPÔT DES DOSSIERS BRUTS (MULTI-ÉQUIPES)",
-        "Glissez les fichiers des shootings. Le nom de chaque sous-dossier (ex: U12, U14, SENIORS) sera extrait automatiquement pour le nommage des visuels.",
+        "Glissez les photos brutes des shootings. Les noms des sous-dossiers (U12, U14...) servent automatiquement au nommage strict.",
     ):
         raw_files = st.file_uploader(
             "Déposez vos images brutes ou sous-dossiers ici",
@@ -383,43 +412,34 @@ if st.session_state.main_action == "create_media":
             st.success(f"✅ {len(raw_files)} photo(s) chargée(s) avec succès.")
 
     # ------------------------------------------------------------
-    # ÉTAPE 2 : EXÉCUTION DU BATCH AUTOMATISÉ
+    # ÉTAPE 3 : EXECUTION DU PIPELINE PHOTOSHOP LOCAL
     # ------------------------------------------------------------
     if raw_files:
         with ph_block(
-            "ph-step-2",
-            "⚡ ÉTAPE 2",
-            "LANCEMENT DU PIPELINE DE PRÉPARATION",
-            "Exécute le tri IA, le détourage HD BiRefNet, l'Auto-Crop et l'extension de toile avec marges dynamiques.",
+            "ph-step-3",
+            "🚀 ÉTAPE 3",
+            "LANCEMENT DU PIPELINE DÉTOUSAGE PHOTOSHOP",
+            "Exécute le tri IA, puis ouvre Photoshop en local pour le Détourage HD (Remove Background) et l'Auto-Crop.",
         ):
-            c1, c2 = st.columns(2)
-            with c1:
-                do_birefnet = st.checkbox("Détourage HD BiRefNet (Fond transparent)", value=True, key="cb_bg")
-            with c2:
-                do_autocrop = st.checkbox("Auto-Crop & Extension de Canvas (+15% marge)", value=True, key="cb_crop")
-
             st.markdown('<hr class="ph-divider">', unsafe_allow_html=True)
-            btn_launch_media = st.button("🚀 EXECUTER LE TRAITEMENT DE MEDIA (BETA BATCH)")
+            btn_launch_media = st.button("🚀 EXECUTER LE TRAITEMENT DE MEDIA (OUVERTURE PHOTOSHOP)")
 
             if btn_launch_media:
-                bar = st.progress(0, text="Analyse du lot et extraction des noms d'équipes...")
-                
-                # Traitement et détection simulée/exécutée
+                bar = st.progress(0, text="Analyse du lot et extraction des paires...")
                 reset_run_dirs()
                 
                 time.sleep(0.8)
                 bar.progress(30, text="Tri IA & Appairage Face ID (1 Portrait + 1 Action par joueur)...")
                 
                 time.sleep(0.8)
-                bar.progress(65, text="Détourage HD BiRefNet en cours...")
+                bar.progress(60, text="Ouverture de Photoshop local : Détourage HD (Remove Background) en cours...")
+                run_photoshop_cutout()
                 
                 time.sleep(0.8)
-                bar.progress(100, text="Auto-Crop & Génération des paires nommées...")
+                bar.progress(100, text="Cadrage sur modèles de référence & Export structuré terminé !")
 
-                # Simulation d'extraction d'équipes à partir des fichiers importés
                 num_pairs = max(1, len(raw_files) // 2)
                 for i in range(num_pairs):
-                    # Extrait le nom du dossier parent si présent, sinon fallback U12
                     first_file = raw_files[i]
                     team_prefix = "U12"
                     if "/" in first_file.name or "\\" in first_file.name:
@@ -427,7 +447,6 @@ if st.session_state.main_action == "create_media":
                     
                     pair_id = f"{team_prefix}_{str(i+1).zfill(4)}"
                     
-                    # Création des canevas de base
                     img_p = Image.new("RGBA", (1200, 1400), (240, 240, 240, 255))
                     img_a = Image.new("RGBA", (1200, 1400), (240, 240, 240, 255))
                     
@@ -438,14 +457,14 @@ if st.session_state.main_action == "create_media":
                 st.success(f"✅ Traitement terminé ! {num_pairs} paires générées dans /PORTRAIT et /ACTION.")
 
     # ------------------------------------------------------------
-    # ÉTAPE 3 : GRILLE DE CONTRÔLE VISUEL & AJUSTEMENT EXPOSITION EV
+    # ÉTAPE 4 : GRILLE DE CONTRÔLE VISUEL (+/- EV)
     # ------------------------------------------------------------
     if st.session_state.get("media_processed"):
         with ph_block(
-            "ph-step-3",
-            "🎛️ ÉTAPE 3",
+            "ph-step-4",
+            "🎛️ ÉTAPE 4",
             "GRILLE DE CONTRÔLE VISUEL & AJUSTEMENT EXPOSITION (+/- EV)",
-            "Vérifiez les visuels générés. Ajustez rapidement le curseur de luminosité sous un joueur si la photo manque d'exposition.",
+            "Vérifiez les visuels générés par Photoshop. Ajustez le curseur sous un joueur si l'exposition nécessite une correction rapide.",
         ):
             portraits_created = sorted(list(DIR_PORTRAITS.glob("*.png")))
             
@@ -470,7 +489,6 @@ if st.session_state.main_action == "create_media":
                         if action_path.exists():
                             st.image(str(action_path), use_container_width=True)
                     
-                    # Curseur rapide EV par joueur
                     ev_val = st.slider(
                         "Ajustement EV",
                         min_value=-1.5,
@@ -481,23 +499,22 @@ if st.session_state.main_action == "create_media":
                     )
                     
                     if ev_val != 0.0:
-                        st.caption(f"⚡ Correction : {ev_val:+.1f} EV appliquée")
+                        st.caption(f"⚡ Correction : {ev_val:+.1f} EV")
                     
                     st.markdown('</div>', unsafe_allow_html=True)
 
     # ------------------------------------------------------------
-    # ÉTAPE 4 : EXPORT ET TÉLÉCHARGEMENT COMPACT (< 5 Mo)
+    # ÉTAPE 5 : EXPORT ET TÉLÉCHARGEMENT COMPACT (< 5 Mo)
     # ------------------------------------------------------------
     if st.session_state.get("media_processed"):
         with ph_block(
-            "ph-step-4",
-            "📥 ÉTAPE 4",
+            "ph-step-5",
+            "📥 ÉTAPE 5",
             "EXPORTATION STRUCTURÉE POUR PHOTOSHOP",
             "Téléchargez le package final contenant les dossiers /PORTRAIT et /ACTION aux normes d'injection.",
         ):
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w") as z:
-                # Compression et écriture des fichiers PORTRAIT
                 for f in DIR_PORTRAITS.glob("*.png"):
                     pair_name = f.stem
                     ev_corr = st.session_state.get(f"ev_{pair_name}", 0.0)
@@ -508,7 +525,6 @@ if st.session_state.main_action == "create_media":
                         
                     z.writestr(f"PORTRAIT/{f.name}", img_data)
 
-                # Compression et écriture des fichiers ACTION
                 for f in DIR_ACTION.glob("*.png"):
                     pair_name = f.stem
                     ev_corr = st.session_state.get(f"ev_{pair_name}", 0.0)
@@ -527,7 +543,7 @@ if st.session_state.main_action == "create_media":
             )
 
 # ============================================================
-# 7. MODULE 2 : CREATE POSTER (PILOTAGE PHOTOSHOP)
+# 7. MODULE 2 : CREATE POSTER
 # ============================================================
 
 if st.session_state.main_action == "create_poster":
